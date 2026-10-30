@@ -9,7 +9,8 @@ st.set_page_config(page_title="Intraday Strategy Backtester", layout="wide")
 st.title("Intraday Trading System Backtester")
 st.markdown("""
 This application runs intraday trading strategies using **2-minute intraday data** 
-(maximum lookback on Yahoo Finance is **60 days**), incorporating fixed commissions ($1 per execution).
+(maximum lookback on Yahoo Finance is **60 days**), incorporating fixed commissions ($1 per execution). 
+Exits are evaluated on bar closes crossing defined percentage thresholds.
 """)
 
 # Sidebar Controls for Strategy Selection
@@ -38,9 +39,10 @@ if strategy_type == "Opening Range Breakout (ORB)":
         holding_bars = st.sidebar.slider("Hold Duration (Number of 2-min Bars)", min_value=1, max_value=60, value=10, step=1)
 else:
     st.sidebar.header("Open-Percent Strategy Configuration")
-    entry_threshold_pct = st.sidebar.slider("Entry Threshold (% Above Open)", min_value=0.05, max_value=2.0, value=0.25, step=0.05)
-    target_pct = st.sidebar.slider("Profit Target (% Above Entry)", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
-    stop_pct = st.sidebar.slider("Stop Loss (% Below Entry)", min_value=0.05, max_value=5.0, value=0.25, step=0.05)
+    trade_direction = st.sidebar.selectbox("Trade Direction", options=["Both (Long & Short)", "Long Only", "Short Only"])
+    entry_threshold_pct = st.sidebar.slider("Entry Threshold (% from Open)", min_value=0.05, max_value=2.0, value=0.25, step=0.05)
+    target_pct = st.sidebar.slider("Profit Target (%)", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
+    stop_pct = st.sidebar.slider("Stop Loss (%)", min_value=0.05, max_value=5.0, value=0.25, step=0.05)
 
 @st.cache_data(ttl=3600)
 def load_intraday_data(symbol):
@@ -173,19 +175,19 @@ else:
                         break
 
     # ----------------------------------------------------
-    # STRATEGY 2: Open-Percent Threshold Strategy
+    # STRATEGY 2: Open-Percent Threshold Strategy (Long & Short via Close)
     # ----------------------------------------------------
     else:
         for date, group in grouped_days:
             if len(group) < 2:
                 continue
             
-            # Day's open price (open of the first bar of the day)
             day_open = group.iloc[0]['Open']
             
             in_position = False
             entry_price = 0.0
             entry_time = None
+            direction = None
             target_price = 0.0
             stop_price = 0.0
             
@@ -195,30 +197,54 @@ else:
                 close = bar['Close']
                 
                 if not in_position:
-                    # Enter long if close is XX% above the day's open
-                    if close >= day_open * (1 + entry_threshold_pct / 100.0):
+                    # Check Long Entry: Close is XX% above open
+                    if trade_direction in ["Both (Long & Short)", "Long Only"] and close >= day_open * (1 + entry_threshold_pct / 100.0):
                         in_position = True
+                        direction = 'LONG'
                         entry_price = close
                         entry_time = bar_time
                         target_price = entry_price * (1 + target_pct / 100.0)
                         stop_price = entry_price * (1 - stop_pct / 100.0)
+                        
+                    # Check Short Entry: Close is XX% below open
+                    elif trade_direction in ["Both (Long & Short)", "Short Only"] and close <= day_open * (1 - entry_threshold_pct / 100.0):
+                        in_position = True
+                        direction = 'SHORT'
+                        entry_price = close
+                        entry_time = bar_time
+                        target_price = entry_price * (1 - target_pct / 100.0)
+                        stop_price = entry_price * (1 + stop_pct / 100.0)
                 else:
                     exit_price = None
                     exit_reason = None
                     
-                    # Close-based exit rules
-                    if close >= target_price:
-                        exit_price = close
-                        exit_reason = 'Profit Target (Close)'
-                    elif close <= stop_price:
-                        exit_price = stop_price
-                        exit_reason = 'Stop Loss (Close)'
-                    elif i == len(group) - 1:
-                        exit_price = close
-                        exit_reason = 'EOD Close'
+                    if direction == 'LONG':
+                        if close >= target_price:
+                            exit_price = close
+                            exit_reason = 'Profit Target (Close)'
+                        elif close <= stop_price:
+                            exit_price = close
+                            exit_reason = 'Stop Loss (Close)'
+                        elif i == len(group) - 1:
+                            exit_price = close
+                            exit_reason = 'EOD Close'
+                    elif direction == 'SHORT':
+                        if close <= target_price:
+                            exit_price = close
+                            exit_reason = 'Profit Target (Close)'
+                        elif close >= stop_price:
+                            exit_price = close
+                            exit_reason = 'Stop Loss (Close)'
+                        elif i == len(group) - 1:
+                            exit_price = close
+                            exit_reason = 'EOD Close'
                         
                     if exit_price is not None:
-                        gross_pnl = (exit_price - entry_price) * position_size_shares
+                        if direction == 'LONG':
+                            gross_pnl = (exit_price - entry_price) * position_size_shares
+                        else:
+                            gross_pnl = (entry_price - exit_price) * position_size_shares
+                            
                         total_commission = commission_per_order * 2
                         net_pnl = gross_pnl - total_commission
                         
@@ -226,7 +252,7 @@ else:
                             'Date': date,
                             'Entry Time': entry_time,
                             'Exit Time': bar_time,
-                            'Direction': 'LONG',
+                            'Direction': direction,
                             'Entry Price': entry_price,
                             'Exit Price': exit_price,
                             'Exit Reason': exit_reason,
@@ -255,7 +281,7 @@ else:
         col3.metric("Total Trades", total_trades)
         col4.metric("Wins / Losses", f"{winning_trades} / {losing_trades}")
         
-        # Long vs Short Breakdown Section (Only applicable for ORB, but displayed cleanly for both)
+        # Long vs Short Breakdown Section
         st.subheader("Long vs. Short Breakdown")
         long_trades = trades_df[trades_df['Direction'] == 'LONG']
         short_trades = trades_df[trades_df['Direction'] == 'SHORT']
