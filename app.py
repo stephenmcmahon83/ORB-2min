@@ -16,9 +16,9 @@ It models profit targets, stop losses, and **$1 commissions per trade execution*
 # Sidebar Controls for Strategy Parameters
 st.sidebar.header("Strategy Configuration")
 ticker = st.sidebar.text_input("Ticker Symbol", value="SPY").upper()
-or_minutes = st.sidebar.slider("Opening Range Duration (Minutes)", min_val=2, max_val=60, value=30, step=2)
-profit_target_pct = st.sidebar.slider("Profit Target (%)", min_val=0.1, max_val=5.0, value=1.0, step=0.1)
-stop_loss_pct = st.sidebar.slider("Stop Loss (%)", min_val=0.1, max_val=5.0, value=0.5, step=0.1)
+or_minutes = st.sidebar.slider("Opening Range Duration (Minutes)", min_value=2, max_value=60, value=30, step=2)
+profit_target_pct = st.sidebar.slider("Profit Target (%)", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
+stop_loss_pct = st.sidebar.slider("Stop Loss (%)", min_value=0.1, max_value=5.0, value=0.5, step=0.1)
 position_size_shares = st.sidebar.number_input("Shares / Contracts per Trade", value=100, step=10)
 commission_per_order = 1.0  # $1 commission per order leg (Entry & Exit)
 
