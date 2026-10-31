@@ -3,12 +3,12 @@ import pandas as pd
 import numpy as np
 
 # Page Configuration
-st.set_page_config(page_title="SPY CSV ORB Backtester (1-Min Precision)", layout="wide")
+st.set_page_config(page_title="SPY CSV ORB Backtester", layout="wide")
 
 st.title("Opening Range Breakout (ORB) Strategy Backtester")
 st.markdown("""
-Upload your 1-minute SPY CSV file where **Column A** contains timestamps (e.g., `3/7/2022 9:32:00 AM`), 
-followed by Open, High, Low, Close, and Volume. Opening range durations can now be configured down to **1-minute intervals**.
+Upload your 1-minute SPY CSV file. This version flexible-starts trading on the **first available bar** of each day, 
+bypassing strict 9:30 AM grid requirements so your dataset generates results.
 """)
 
 # Sidebar Controls
@@ -21,7 +21,6 @@ commission_per_trade = st.sidebar.number_input("Commission per Trade ($)", value
 
 # Strategy Parameters
 st.sidebar.header("3. Strategy Parameters")
-# Updated to allow 1-minute minimum interval and step of 1
 or_minutes = st.sidebar.slider("Opening Range Duration (Minutes)", min_value=1, max_value=60, value=15, step=1)
 exit_mode = st.sidebar.selectbox("Exit Mode", options=["Profit Target (%)", "Hold for X Bars"])
 
@@ -86,39 +85,29 @@ if uploaded_file is not None:
     df = df.between_time('09:30', '16:00')
     
     if df.empty:
-        st.error("No data remaining after filtering for regular trading hours (9:30 AM - 4:00 PM). Check your timestamp formatting.")
+        st.error("No data remaining after filtering for regular trading hours. Check your timestamp formatting.")
         st.stop()
 
     raw_trades = []
-    num_or_bars = or_minutes  # 1 bar per minute since data is 1-minute frequency
+    num_or_bars = or_minutes  # Number of 1-min bars for the opening range
     
     grouped_days = df.groupby(df.index.date)
-    skipped_days_count = 0
-    total_days_processed = 0
+    days_backtested = 0
     
     for date, group in grouped_days:
-        total_days_processed += 1
-        
         group = group[~group.index.duplicated(keep='first')]
         
-        if len(group) > 0:
-            expected_index = pd.date_range(start=group.index[0], end=group.index[-1], freq='1min')
-            reindexed_group = group.reindex(expected_index)
-            
-            if reindexed_group['Close'].isna().any() or len(group) < 390:
-                skipped_days_count += 1
-                continue
-            
-            clean_group = reindexed_group
-        else:
-            skipped_days_count += 1
+        # Ensure there are enough bars in the day to form an opening range + at least 1 trade bar
+        if len(group) < num_or_bars + 1:
             continue
+            
+        days_backtested += 1
         
-        or_slice = clean_group.iloc[:num_or_bars]
+        or_slice = group.iloc[:num_or_bars]
         or_high = or_slice['High'].max()
         or_low = or_slice['Low'].min()
         
-        trading_slice = clean_group.iloc[num_or_bars:]
+        trading_slice = group.iloc[num_or_bars:]
         in_position = False
         entry_price = 0.0
         entry_time = None
@@ -209,10 +198,10 @@ if uploaded_file is not None:
                     in_position = False
                     break
 
-    st.info(f"🔍 **Data Quality Filter Report:** Processed {total_days_processed} total calendar days. Omitted **{skipped_days_count} days** due to missing minute gaps or incomplete sessions. Backtested **{total_days_processed - skipped_days_count} clean days**.")
+    st.success(f"Successfully backtested **{days_backtested} trading days** from your uploaded file!")
 
     if not raw_trades:
-        st.warning("No trades were triggered using the current parameters and filtered dataset.")
+        st.warning("No trades were triggered using the current parameters. Try adjusting your Opening Range duration, stop loss, or profit target.")
     else:
         trades_df = pd.DataFrame(raw_trades).sort_values(by='Entry Time').reset_index(drop=True)
         
