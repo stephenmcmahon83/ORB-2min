@@ -3,12 +3,12 @@ import pandas as pd
 import numpy as np
 
 # Page Configuration
-st.set_page_config(page_title="SPY CSV ORB Backtester", layout="wide")
+st.set_page_config(page_title="SPY CSV ORB Backtester (1-Min Precision)", layout="wide")
 
 st.title("Opening Range Breakout (ORB) Strategy Backtester")
 st.markdown("""
 Upload your 1-minute SPY CSV file where **Column A** contains timestamps (e.g., `3/7/2022 9:32:00 AM`), 
-followed by Open, High, Low, Close, and Volume.
+followed by Open, High, Low, Close, and Volume. Opening range durations can now be configured down to **1-minute intervals**.
 """)
 
 # Sidebar Controls
@@ -21,7 +21,8 @@ commission_per_trade = st.sidebar.number_input("Commission per Trade ($)", value
 
 # Strategy Parameters
 st.sidebar.header("3. Strategy Parameters")
-or_minutes = st.sidebar.slider("Opening Range Duration (Minutes)", min_value=2, max_value=60, value=30, step=2)
+# Updated to allow 1-minute minimum interval and step of 1
+or_minutes = st.sidebar.slider("Opening Range Duration (Minutes)", min_value=1, max_value=60, value=15, step=1)
 exit_mode = st.sidebar.selectbox("Exit Mode", options=["Profit Target (%)", "Hold for X Bars"])
 
 # Stop Loss Rule Configuration
@@ -40,29 +41,25 @@ if exit_mode == "Profit Target (%)":
     holding_bars = 0
 else:
     profit_target_pct = 0.0
-    holding_bars = st.sidebar.slider("Holding Bars (1-min intervals)", min_value=5, max_value=240, value=10, step=5)
+    holding_bars = st.sidebar.slider("Holding Bars (1-min intervals)", min_value=1, max_value=240, value=10, step=1)
 
 if uploaded_file is not None:
     try:
-        # Robust CSV reader with automatic delimiter detection
         df = pd.read_csv(uploaded_file, sep=None, engine='python')
     except Exception as e:
         st.error(f"Error reading CSV file: {e}")
         st.stop()
 
-    # Show raw preview for debugging
     with st.expander("🔍 View Raw Uploaded Data Preview"):
         st.write("Detected Columns:", list(df.columns))
         st.dataframe(df.head(), use_container_width=True)
 
     try:
-        # Column A (index 0) as DateTime
         datetime_col_name = df.columns[0]
         df[datetime_col_name] = pd.to_datetime(df[datetime_col_name], errors='coerce')
         df = df.dropna(subset=[datetime_col_name])
         df.set_index(datetime_col_name, inplace=True)
         
-        # Standardize columns: Column A = Index, next columns = Open, High, Low, Close, Volume
         expected_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
         if len(df.columns) >= 5:
             df = df.iloc[:, :5]
@@ -70,7 +67,6 @@ if uploaded_file is not None:
         else:
             df.columns = [str(c).capitalize() for c in df.columns[:len(expected_cols)]]
             
-        # Ensure price columns are numeric
         for col in ['Open', 'High', 'Low', 'Close']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         df = df.dropna(subset=['Open', 'High', 'Low', 'Close'])
@@ -79,7 +75,6 @@ if uploaded_file is not None:
         st.error(f"Error parsing datetime or price columns: {e}")
         st.stop()
 
-    # Timezone localization and regular trading hours filter (9:30 AM - 4:00 PM EST)
     if df.index.tz is not None:
         df.index = df.index.tz_convert('America/New_York')
     else:
@@ -95,7 +90,7 @@ if uploaded_file is not None:
         st.stop()
 
     raw_trades = []
-    num_or_bars = or_minutes
+    num_or_bars = or_minutes  # 1 bar per minute since data is 1-minute frequency
     
     grouped_days = df.groupby(df.index.date)
     skipped_days_count = 0
@@ -104,14 +99,12 @@ if uploaded_file is not None:
     for date, group in grouped_days:
         total_days_processed += 1
         
-        # --- GAP & COMPLETENESS CHECK ---
         group = group[~group.index.duplicated(keep='first')]
         
         if len(group) > 0:
             expected_index = pd.date_range(start=group.index[0], end=group.index[-1], freq='1min')
             reindexed_group = group.reindex(expected_index)
             
-            # Skip days with missing minutes or incomplete sessions (< 390 bars)
             if reindexed_group['Close'].isna().any() or len(group) < 390:
                 skipped_days_count += 1
                 continue
@@ -120,7 +113,6 @@ if uploaded_file is not None:
         else:
             skipped_days_count += 1
             continue
-        # --------------------------------
         
         or_slice = clean_group.iloc[:num_or_bars]
         or_high = or_slice['High'].max()
@@ -152,7 +144,7 @@ if uploaded_file is not None:
                     if stop_loss_type == "Fixed Percentage (%)":
                         stop_price = entry_price * (1 - stop_loss_pct / 100.0)
                     else:
-                        stop_price = or_low - 0.01  # 1 tick below OR low
+                        stop_price = or_low - 0.01
                         
                     if exit_mode == "Profit Target (%)":
                         target_price = entry_price * (1 + profit_target_pct / 100.0)
@@ -167,7 +159,7 @@ if uploaded_file is not None:
                     if stop_loss_type == "Fixed Percentage (%)":
                         stop_price = entry_price * (1 + stop_loss_pct / 100.0)
                     else:
-                        stop_price = or_high + 0.01  # 1 tick above OR high
+                        stop_price = or_high + 0.01
                         
                     if exit_mode == "Profit Target (%)":
                         target_price = entry_price * (1 - profit_target_pct / 100.0)
@@ -217,7 +209,6 @@ if uploaded_file is not None:
                     in_position = False
                     break
 
-    # Display Data Quality Stats
     st.info(f"🔍 **Data Quality Filter Report:** Processed {total_days_processed} total calendar days. Omitted **{skipped_days_count} days** due to missing minute gaps or incomplete sessions. Backtested **{total_days_processed - skipped_days_count} clean days**.")
 
     if not raw_trades:
@@ -225,7 +216,6 @@ if uploaded_file is not None:
     else:
         trades_df = pd.DataFrame(raw_trades).sort_values(by='Entry Time').reset_index(drop=True)
         
-        # Compounding Equity Tracking
         current_equity = starting_capital
         simulated_trades = []
         
@@ -258,7 +248,6 @@ if uploaded_file is not None:
             
         final_trades_df = pd.DataFrame(simulated_trades).sort_values(by='Exit Time').reset_index(drop=True)
         
-        # Metrics Summary
         st.subheader("Performance Summary")
         total_net_pnl = final_trades_df['Net PnL ($)'].sum()
         win_rate = (final_trades_df['Net PnL ($)'] > 0).mean() * 100
@@ -272,7 +261,6 @@ if uploaded_file is not None:
         col3.metric("Total Trades", total_trades)
         col4.metric("Wins / Losses", f"{winning_trades} / {losing_trades}")
         
-        # Long vs Short Breakdown
         st.subheader("Long vs. Short Breakdown")
         long_trades = final_trades_df[final_trades_df['Direction'] == 'LONG']
         short_trades = final_trades_df[final_trades_df['Direction'] == 'SHORT']
@@ -298,12 +286,10 @@ if uploaded_file is not None:
             else:
                 st.info("No short trades taken.")
 
-        # Equity Curve
         final_trades_df['Cumulative PnL'] = final_trades_df['Net PnL ($)'].cumsum()
         st.subheader("Strategy Equity Curve")
         st.line_chart(final_trades_df.set_index('Exit Time')['Cumulative PnL'])
         
-        # Master Trade Log
         st.subheader("Master Trade Log")
         st.dataframe(final_trades_df, use_container_width=True)
 else:
