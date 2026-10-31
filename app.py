@@ -9,7 +9,8 @@ st.set_page_config(page_title="Multi-Stock Intraday Parameter Optimizer & Heatma
 st.title("Multi-Stock Intraday Strategy Heatmap & Parameter Optimizer")
 st.markdown("""
 Run batch parameter sweeps across multiple stocks using **2-minute intraday data**, configurable commissions, 
-per-ticker compounding equity, and **multiple profit targets**. Results are displayed in an interactive performance matrix.
+per-ticker compounding equity, and flexible exit modes (**Profit Targets** or **Bar Holds**). 
+Results are displayed in an interactive performance matrix.
 """)
 
 # Sidebar Controls
@@ -28,11 +29,19 @@ initial_capital_per_ticker = total_starting_capital / max(num_positions, 1)
 # Editable commission control
 commission_per_trade = st.sidebar.number_input("Commission per Trade ($)", value=1.0, step=0.25, format="%.2f")
 
-# Parameter Sweep Ranges including Multiple Profit Targets
+# Parameter Sweep Ranges & Exit Mode Selection
 st.sidebar.header("3. Parameter Sweep Ranges")
+exit_mode = st.sidebar.selectbox("Exit Mode", options=["Profit Target (%)", "Hold for X Bars"])
+
 or_minutes_list = [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30]
 stop_loss_list = [0.25, 0.50, 0.75, 1.00]
-profit_target_list = [0.5, 1.0, 1.5, 2.0]  # Multiple profit targets to test
+
+if exit_mode == "Profit Target (%)":
+    sweep_param_list = [0.5, 1.0, 1.5, 2.0]  # Profit targets in %
+    param_label = "Profit Target (%)"
+else:
+    sweep_param_list = [5, 10, 15, 20]     # Number of 2-minute bars to hold
+    param_label = "Holding Bars"
 
 @st.cache_data(ttl=3600)
 def load_all_data(symbol_list):
@@ -50,7 +59,7 @@ def load_all_data(symbol_list):
             data_dict[symbol] = df
     return data_dict
 
-def run_backtest_simulation(all_data, p_or_mins, p_stop, p_target):
+def run_backtest_simulation(all_data, p_or_mins, p_stop, p_val):
     raw_trades = []
     
     for ticker, data in all_data.items():
@@ -72,6 +81,7 @@ def run_backtest_simulation(all_data, p_or_mins, p_stop, p_target):
             direction = None 
             target_price = 0.0
             stop_price = 0.0
+            bars_held = 0
             
             for i in range(len(trading_slice)):
                 bar = trading_slice.iloc[i]
@@ -87,29 +97,38 @@ def run_backtest_simulation(all_data, p_or_mins, p_stop, p_target):
                         entry_price = close
                         entry_time = bar_time
                         stop_price = entry_price * (1 - p_stop / 100.0)
-                        target_price = entry_price * (1 + p_target / 100.0)
+                        if exit_mode == "Profit Target (%)":
+                            target_price = entry_price * (1 + p_val / 100.0)
+                        bars_held = 0
                     elif close < or_low:
                         in_position = True
                         direction = 'SHORT'
                         entry_price = close
                         entry_time = bar_time
                         stop_price = entry_price * (1 + p_stop / 100.0)
-                        target_price = entry_price * (1 - p_target / 100.0)
+                        if exit_mode == "Profit Target (%)":
+                            target_price = entry_price * (1 - p_val / 100.0)
+                        bars_held = 0
                 else:
+                    bars_held += 1
                     exit_price = None
                     
                     if direction == 'LONG':
                         if low <= stop_price:
                             exit_price = stop_price
-                        elif high >= target_price:
+                        elif exit_mode == "Profit Target (%)" and high >= target_price:
                             exit_price = target_price
+                        elif exit_mode == "Hold for X Bars" and bars_held >= p_val:
+                            exit_price = close
                         elif i == len(trading_slice) - 1:
                             exit_price = close
                     elif direction == 'SHORT':
                         if high >= stop_price:
                             exit_price = stop_price
-                        elif low <= target_price:
+                        elif exit_mode == "Profit Target (%)" and low <= target_price:
                             exit_price = target_price
+                        elif exit_mode == "Hold for X Bars" and bars_held >= p_val:
+                            exit_price = close
                         elif i == len(trading_slice) - 1:
                             exit_price = close
                     
@@ -163,18 +182,18 @@ all_data = load_all_data(tickers)
 if not all_data:
     st.error("No valid data retrieved for any of the specified tickers. Please verify the symbols.")
 else:
-    if st.button("Run Multi-Target Parameter Sweep", type="primary"):
-        with st.spinner("Running parameter combinations across profit targets, stop losses, and durations..."):
+    if st.button("Run Parameter Sweep Matrix", type="primary"):
+        with st.spinner(f"Running parameter combinations across {exit_mode.lower()} values, stop losses, and durations..."):
             sweep_results = []
             
             for or_m in or_minutes_list:
                 for sl in stop_loss_list:
-                    for pt in profit_target_list:
-                        pnl, wr, count = run_backtest_simulation(all_data, or_m, sl, pt)
+                    for val in sweep_param_list:
+                        pnl, wr, count = run_backtest_simulation(all_data, or_m, sl, val)
                         sweep_results.append({
                             'OR_Minutes': or_m,
                             'Stop_Loss': sl,
-                            'Profit_Target': pt,
+                            param_label: val,
                             'Net_PnL': round(pnl, 2),
                             'Win_Rate': round(wr, 1),
                             'Trades': count
@@ -183,17 +202,16 @@ else:
             sweep_df = pd.DataFrame(sweep_results)
             
             st.subheader("Complete Sweep Results Table")
-            st.markdown("This table shows performance metrics for **every** combination of Opening Range duration, Stop Loss, and Profit Target.")
             st.dataframe(sweep_df.sort_values(by="Net_PnL", ascending=False), use_container_width=True)
             
             # Interactive Matrix Slice for Heatmap/Table View
-            st.subheader("Interactive Heatmap Matrix Slice by Profit Target")
-            selected_pt = st.selectbox("Select Profit Target (%) to view matrix slice:", options=profit_target_list)
+            st.subheader("Interactive Heatmap Matrix Slice")
+            selected_param = st.selectbox(f"Select {param_label} to view matrix slice:", options=sweep_param_list)
             
-            filtered_df = sweep_df[sweep_df['Profit_Target'] == selected_pt]
+            filtered_df = sweep_df[sweep_df[param_label] == selected_param]
             matrix_df = filtered_df.pivot(index="OR_Minutes", columns="Stop_Loss", values="Net_PnL")
             
-            st.markdown(f"**Net PnL Heatmap Matrix for Profit Target = {selected_pt}%** (Rows: OR Duration, Columns: Stop Loss)")
+            st.markdown(f"**Net PnL Heatmap Matrix for {param_label} = {selected_param}** (Rows: OR Duration, Columns: Stop Loss)")
             st.dataframe(
                 matrix_df.style.background_gradient(cmap="RdYlGn", axis=None), 
                 use_container_width=True
