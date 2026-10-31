@@ -7,8 +7,9 @@ st.set_page_config(page_title="Custom Data ORB Backtester with Gap Filter", layo
 
 st.title("Opening Range Breakout (ORB) Strategy Backtester (Gap-Filtered)")
 st.markdown("""
-Upload your 1-minute SPY CSV or Excel file. The app automatically screens every trading day for **missing minute gaps** 
-and incomplete sessions, omitting gapped days entirely before running the compounding backtest.
+Upload your 1-minute SPY CSV or Excel file (where Column A contains timestamps like `3/7/2022 9:32:00 AM`, 
+followed by Open, High, Low, Close, and Volume). The app screens every trading day for missing minute gaps 
+and runs a compounding backtest.
 """)
 
 # Sidebar Controls
@@ -55,24 +56,25 @@ if uploaded_file is not None:
     with st.spinner("Processing uploaded data file..."):
         df = load_data_file(uploaded_file)
         
-    # Attempt to auto-detect datetime column
-    datetime_col = None
-    for col in df.columns:
-        if 'date' in col.lower() or 'time' in col.lower():
-            datetime_col = col
-            break
-            
-    if datetime_col:
-        df[datetime_col] = pd.to_datetime(df[datetime_col])
-        df.set_index(datetime_col, inplace=True)
-        
-    # Ensure columns are properly capitalized
-    df.columns = [c.capitalize() for c in df.columns]
+    # Explicitly map Column A (index 0) as DateTime and subsequent columns to OHLCV
+    # Column A format example: 3/7/2022 9:32:00 AM
+    datetime_col_name = df.columns[0]
+    df[datetime_col_name] = pd.to_datetime(df[datetime_col_name], errors='coerce')
+    df.set_index(datetime_col_name, inplace=True)
     
-    if not all(k in df.columns for k in ['Open', 'High', 'Low', 'Close']):
-        st.error("Uploaded file must contain columns for Open, High, Low, and Close prices.")
+    # Standardize column names based on standard layout (Column A = Date/Time, followed by Open, High, Low, Close, Volume)
+    expected_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+    if len(df.columns) >= 5:
+        df = df.iloc[:, :5]  # Take first 5 columns after index
+        df.columns = expected_cols
     else:
-        # Localize/Clean timezone and filter regular trading hours
+        # Fallback renaming if columns match standard text
+        df.columns = [str(c).capitalize() for c in df.columns[:len(expected_cols)]]
+
+    if not all(k in df.columns for k in ['Open', 'High', 'Low', 'Close']):
+        st.error("Could not automatically map columns. Ensure Column A is Date/Time, followed by Open, High, Low, Close, and Volume.")
+    else:
+        # Localize/Clean timezone and filter regular trading hours (9:30 AM - 4:00 PM EST)
         if df.index.tz is not None:
             df.index = df.index.tz_convert('America/New_York')
         else:
@@ -100,6 +102,7 @@ if uploaded_file is not None:
                 expected_index = pd.date_range(start=group.index[0], end=group.index[-1], freq='1min')
                 reindexed_group = group.reindex(expected_index)
                 
+                # If there are missing minutes (NaNs) or fewer than 390 bars (incomplete session / half-day), skip the day
                 if reindexed_group['Close'].isna().any() or len(group) < 390:
                     skipped_days_count += 1
                     continue
@@ -140,7 +143,7 @@ if uploaded_file is not None:
                         if stop_loss_type == "Fixed Percentage (%)":
                             stop_price = entry_price * (1 - stop_loss_pct / 100.0)
                         else:
-                            stop_price = or_low - 0.01
+                            stop_price = or_low - 0.01  # Bottom of opening range minus 1 tick
                             
                         if exit_mode == "Profit Target (%)":
                             target_price = entry_price * (1 + profit_target_pct / 100.0)
@@ -155,7 +158,7 @@ if uploaded_file is not None:
                         if stop_loss_type == "Fixed Percentage (%)":
                             stop_price = entry_price * (1 + stop_loss_pct / 100.0)
                         else:
-                            stop_price = or_high + 0.01
+                            stop_price = or_high + 0.01  # Top of opening range plus 1 tick
                             
                         if exit_mode == "Profit Target (%)":
                             target_price = entry_price * (1 - profit_target_pct / 100.0)
