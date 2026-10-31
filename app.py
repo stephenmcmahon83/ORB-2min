@@ -8,8 +8,8 @@ st.set_page_config(page_title="Fast Intraday ORB Backtester", layout="wide")
 
 st.title("Opening Range Breakout (ORB) Strategy Backtester")
 st.markdown("""
-A fast, single-pass backtester using **2-minute intraday data**, configurable commissions, 
-and **per-ticker compounding equity** with whole shares.
+A fast intraday backtester using **2-minute intraday data**, configurable commissions, 
+**per-ticker compounding equity**, and flexible stop loss rules (Fixed % vs. Opening Range Boundary).
 """)
 
 # Sidebar Controls
@@ -30,7 +30,17 @@ commission_per_trade = st.sidebar.number_input("Commission per Trade ($)", value
 st.sidebar.header("2. Strategy Parameters")
 or_minutes = st.sidebar.slider("Opening Range Duration (Minutes)", min_value=2, max_value=60, value=30, step=2)
 exit_mode = st.sidebar.selectbox("Exit Mode", options=["Profit Target (%)", "Hold for X Bars"])
-stop_loss_pct = st.sidebar.slider("Stop Loss (%)", min_value=0.25, max_value=3.00, value=0.50, step=0.25)
+
+# Stop Loss Rule Configuration
+stop_loss_type = st.sidebar.selectbox(
+    "Stop Loss Rule", 
+    options=["Fixed Percentage (%)", "Opening Range Boundary (OR Low/High ± 1 tick)"]
+)
+
+if stop_loss_type == "Fixed Percentage (%)":
+    stop_loss_pct = st.sidebar.slider("Stop Loss (%)", min_value=0.25, max_value=3.00, value=0.50, step=0.25)
+else:
+    stop_loss_pct = 0.0
 
 if exit_mode == "Profit Target (%)":
     profit_target_pct = st.sidebar.slider("Profit Target (%)", min_value=0.25, max_value=3.00, value=1.00, step=0.25)
@@ -99,16 +109,29 @@ else:
                         direction = 'LONG'
                         entry_price = close
                         entry_time = bar_time
-                        stop_price = entry_price * (1 - stop_loss_pct / 100.0)
+                        
+                        # Set Stop Price based on selected rule
+                        if stop_loss_type == "Fixed Percentage (%)":
+                            stop_price = entry_price * (1 - stop_loss_pct / 100.0)
+                        else:
+                            stop_price = or_low - 0.01  # Bottom of opening range minus 1 tick ($0.01)
+                            
                         if exit_mode == "Profit Target (%)":
                             target_price = entry_price * (1 + profit_target_pct / 100.0)
                         bars_held = 0
+                        
                     elif close < or_low:
                         in_position = True
                         direction = 'SHORT'
                         entry_price = close
                         entry_time = bar_time
-                        stop_price = entry_price * (1 + stop_loss_pct / 100.0)
+                        
+                        # Set Stop Price based on selected rule
+                        if stop_loss_type == "Fixed Percentage (%)":
+                            stop_price = entry_price * (1 + stop_loss_pct / 100.0)
+                        else:
+                            stop_price = or_high + 0.01  # Top of opening range plus 1 tick ($0.01)
+                            
                         if exit_mode == "Profit Target (%)":
                             target_price = entry_price * (1 - profit_target_pct / 100.0)
                         bars_held = 0
@@ -200,8 +223,8 @@ else:
             
         final_trades_df = pd.DataFrame(simulated_trades).sort_values(by='Exit Time').reset_index(drop=True)
         
-        # Performance Summary Metrics
-        st.subheader("Performance Summary")
+        # Overall Performance Summary
+        st.subheader("Overall Performance Summary")
         total_net_pnl = final_trades_df['Net PnL ($)'].sum()
         win_rate = (final_trades_df['Net PnL ($)'] > 0).mean() * 100
         total_trades = len(final_trades_df)
@@ -214,6 +237,38 @@ else:
         col3.metric("Total Trades", total_trades)
         col4.metric("Wins / Losses", f"{winning_trades} / {losing_trades}")
         
+        # Long vs Short Breakdown Section
+        st.subheader("Long vs. Short Breakdown")
+        long_trades = final_trades_df[final_trades_df['Direction'] == 'LONG']
+        short_trades = final_trades_df[final_trades_df['Direction'] == 'SHORT']
+        
+        l_col1, l_col2 = st.columns(2)
+        with l_col1:
+            st.markdown("#### 🟢 Long Trades")
+            if not long_trades.empty:
+                l_pnl = long_trades['Net PnL ($)'].sum()
+                l_win_rate = (long_trades['Net PnL ($)'] > 0).mean() * 100
+                l_count = len(long_trades)
+                l_wins = len(long_trades[long_trades['Net PnL ($)'] > 0])
+                l_losses = len(long_trades[long_trades['Net PnL ($)'] <= 0])
+                st.metric("Long Net PnL", f"${l_pnl:,.2f}")
+                st.metric("Long Win Rate", f"{l_win_rate:.1f}%", f"{l_count} trades ({l_wins}W / {l_losses}L)")
+            else:
+                st.info("No long trades taken.")
+                
+        with l_col2:
+            st.markdown("#### 🔴 Short Trades")
+            if not short_trades.empty:
+                s_pnl = short_trades['Net PnL ($)'].sum()
+                s_win_rate = (short_trades['Net PnL ($)'] > 0).mean() * 100
+                s_count = len(short_trades)
+                s_wins = len(short_trades[short_trades['Net PnL ($)'] > 0])
+                s_losses = len(short_trades[short_trades['Net PnL ($)'] <= 0])
+                st.metric("Short Net PnL", f"${s_pnl:,.2f}")
+                st.metric("Short Win Rate", f"{s_win_rate:.1f}%", f"{s_count} trades ({s_wins}W / {s_losses}L)")
+            else:
+                st.info("No short trades taken.")
+
         # Ticker Summary Table
         st.subheader("Performance by Ticker")
         ticker_summary = final_trades_df.groupby('Ticker').agg(
