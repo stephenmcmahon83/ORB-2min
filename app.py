@@ -7,13 +7,13 @@ st.set_page_config(page_title="Custom Data ORB Backtester with Gap Filter", layo
 
 st.title("Opening Range Breakout (ORB) Strategy Backtester (Gap-Filtered)")
 st.markdown("""
-Upload your 1-minute SPY Excel file. The app automatically screens every trading day for **missing minute gaps** 
+Upload your 1-minute SPY CSV or Excel file. The app automatically screens every trading day for **missing minute gaps** 
 and incomplete sessions, omitting gapped days entirely before running the compounding backtest.
 """)
 
 # Sidebar Controls
 st.sidebar.header("1. Data Upload")
-uploaded_file = st.sidebar.file_uploader("Upload SPY Excel File", type=["xlsx", "xls"])
+uploaded_file = st.sidebar.file_uploader("Upload SPY Data File", type=["csv", "xlsx", "xls"])
 
 st.sidebar.header("2. Capital & Execution")
 starting_capital = st.sidebar.number_input("Starting Capital ($)", value=20000.0, step=1000.0)
@@ -44,12 +44,16 @@ else:
 
 if uploaded_file is not None:
     @st.cache_data
-    def load_user_excel(file):
-        df = pd.read_excel(file)
+    def load_data_file(file):
+        file_extension = file.name.split('.')[-1].lower()
+        if file_extension == 'csv':
+            df = pd.read_csv(file)
+        else:
+            df = pd.read_excel(file)
         return df
 
-    with st.spinner("Processing uploaded Excel file..."):
-        df = load_user_excel(uploaded_file)
+    with st.spinner("Processing uploaded data file..."):
+        df = load_data_file(uploaded_file)
         
     # Attempt to auto-detect datetime column
     datetime_col = None
@@ -66,7 +70,7 @@ if uploaded_file is not None:
     df.columns = [c.capitalize() for c in df.columns]
     
     if not all(k in df.columns for k in ['Open', 'High', 'Low', 'Close']):
-        st.error("Excel file must contain columns for Open, High, Low, and Close prices.")
+        st.error("Uploaded file must contain columns for Open, High, Low, and Close prices.")
     else:
         # Localize/Clean timezone and filter regular trading hours
         if df.index.tz is not None:
@@ -90,15 +94,12 @@ if uploaded_file is not None:
             total_days_processed += 1
             
             # --- GAP & COMPLETENESS CHECK ---
-            # Remove duplicate timestamps if any exist in the raw file
             group = group[~group.index.duplicated(keep='first')]
             
-            # Reindex to a continuous 1-minute grid from the first timestamp to the last timestamp of the day session
             if len(group) > 0:
                 expected_index = pd.date_range(start=group.index[0], end=group.index[-1], freq='1min')
                 reindexed_group = group.reindex(expected_index)
                 
-                # If there are missing minutes (NaNs) or fewer than 390 bars (incomplete session / half-day), skip the day
                 if reindexed_group['Close'].isna().any() or len(group) < 390:
                     skipped_days_count += 1
                     continue
@@ -294,4 +295,4 @@ if uploaded_file is not None:
             st.subheader("Master Trade Log")
             st.dataframe(final_trades_df, use_container_width=True)
 else:
-    st.info("👈 Please upload your SPY 1-minute Excel file using the sidebar file uploader to begin backtesting.")
+    st.info("👈 Please upload your SPY 1-minute CSV or Excel file using the sidebar file uploader to begin backtesting.")
