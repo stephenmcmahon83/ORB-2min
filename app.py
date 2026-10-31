@@ -29,7 +29,13 @@ commission_per_trade = st.sidebar.number_input("Commission per Trade ($)", value
 # Dropdown for Opening Range Minutes (2 to 60, step 2)
 st.sidebar.header("2. Strategy Parameter")
 or_minutes_options = list(range(2, 62, 2))
-selected_or_minutes = st.sidebar.selectbox("Opening Range Duration (Minutes)", options=or_minutes_options, value=30)
+# Use index for selectbox to avoid any type/version mismatch errors
+default_index = or_minutes_options.index(30) if 30 in or_minutes_options else 14
+selected_or_minutes = st.sidebar.selectbox(
+    "Opening Range Duration (Minutes)", 
+    options=or_minutes_options, 
+    index=default_index
+)
 
 @st.cache_data(ttl=3600)
 def load_all_data(symbol_list):
@@ -48,7 +54,6 @@ def load_all_data(symbol_list):
     return data_dict
 
 def run_matrix_simulation(all_data, p_or_mins, stop_loss_list, metric_mode_list, is_profit_target=True):
-    # Pre-calculate raw trades for all days per ticker to speed up matrix loops
     ticker_daily_bars = {}
     for ticker, data in all_data.items():
         ticker_daily_bars[ticker] = list(data.groupby(data.index.date))
@@ -141,7 +146,6 @@ def run_matrix_simulation(all_data, p_or_mins, stop_loss_list, metric_mode_list,
                                 in_position = False
                                 break
 
-            # Simulate PnL compounding per ticker
             if not raw_trades:
                 row_data[m_val] = 0.0
             else:
@@ -181,20 +185,16 @@ if not all_data:
     st.error("No valid data retrieved for any of the specified tickers. Please verify the symbols.")
 else:
     with st.spinner(f"Computing matrices for {selected_or_minutes}-minute Opening Range..."):
-        # Define ranges as requested
         stop_losses = [0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00]
         profit_targets = [0.25, 0.50, 0.75, 1.00, 1.25, 1.50, 1.75, 2.00]
-        holding_bars_range = list(range(5, 245, 5)) # 5 to 240, step 5
+        holding_bars_range = list(range(5, 245, 5))
 
-        # Run Matrix 1: Profit Targets vs Stop Losses
         pt_matrix = run_matrix_simulation(all_data, selected_or_minutes, stop_losses, profit_targets, is_profit_target=True)
         pt_matrix.index.name = "Stop Loss (%)"
 
-        # Run Matrix 2: Bars Held vs Stop Losses
         bar_matrix = run_matrix_simulation(all_data, selected_or_minutes, stop_losses, holding_bars_range, is_profit_target=False)
         bar_matrix.index.name = "Stop Loss (%)"
 
-    # Display Results
     st.subheader(f"📊 Results for {selected_or_minutes}-Minute Opening Range")
     
     st.markdown("### 1. Profit Target (%) vs. Stop Loss (%) — Net PnL Matrix")
