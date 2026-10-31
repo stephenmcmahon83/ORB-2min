@@ -9,8 +9,8 @@ st.set_page_config(page_title="Multi-Stock Intraday Strategy Backtester", layout
 st.title("Multi-Stock Intraday Trading System Backtester")
 st.markdown("""
 Backtest an entire basket of stocks simultaneously using **2-minute intraday data** 
-(maximum lookback on Yahoo Finance is **60 days**), incorporating fixed commissions ($1 per leg / $2 per round trip). 
-Exits are evaluated on bar closes crossing defined percentage thresholds.
+(maximum lookback on Yahoo Finance is **60 days**), incorporating a flat **$1.00 commission per trade**. 
+Positions are sized in **dollars per trade** and dynamically shrink if portfolio equity turns negative.
 """)
 
 # Sidebar Controls for Strategy Selection
@@ -27,8 +27,11 @@ tickers_input = st.sidebar.text_input(
 )
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
-position_size_shares = st.sidebar.number_input("Shares / Contracts per Trade (per stock)", value=100, step=10)
-commission_per_order = 1.0  # $1 commission per order leg (Entry & Exit)
+# Dollar-based position sizing controls
+st.sidebar.header("Capital & Risk Management")
+base_capital_per_trade = st.sidebar.number_input("Starting Capital Size per Trade ($)", value=10000.0, step=1000.0)
+reduced_capital_per_trade = st.sidebar.number_input("Reduced Capital Size per Trade (if Equity < 0) ($)", value=8000.0, step=1000.0)
+commission_per_trade = 1.0  # Flat $1 commission per trade
 
 # Dynamic Sidebar Parameters Based on Strategy
 if strategy_type == "Opening Range Breakout (ORB)":
@@ -74,15 +77,12 @@ all_data = load_all_data(tickers)
 if not all_data:
     st.error("No valid data retrieved for any of the specified tickers. Please verify the symbols.")
 else:
-    all_trades = []
+    raw_trades = []
 
-    # Run backtest for each ticker independently
+    # Step 1: Generate all raw trades per ticker independently
     for ticker, data in all_data.items():
         grouped_days = data.groupby(data.index.date)
         
-        # ----------------------------------------------------
-        # STRATEGY 1: Opening Range Breakout (ORB)
-        # ----------------------------------------------------
         if strategy_type == "Opening Range Breakout (ORB)":
             for date, group in grouped_days:
                 num_or_bars = or_minutes // 2
@@ -161,15 +161,7 @@ else:
                                 exit_reason = 'EOD Close'
                         
                         if exit_price is not None:
-                            if direction == 'LONG':
-                                gross_pnl = (exit_price - entry_price) * position_size_shares
-                            else:
-                                gross_pnl = (entry_price - exit_price) * position_size_shares
-                                
-                            total_commission = commission_per_order * 2
-                            net_pnl = gross_pnl - total_commission
-                            
-                            all_trades.append({
+                            raw_trades.append({
                                 'Ticker': ticker,
                                 'Date': date,
                                 'Entry Time': entry_time,
@@ -177,16 +169,10 @@ else:
                                 'Direction': direction,
                                 'Entry Price': entry_price,
                                 'Exit Price': exit_price,
-                                'Exit Reason': exit_reason,
-                                'Gross PnL ($)': round(gross_pnl, 2),
-                                'Net PnL ($)': round(net_pnl, 2)
+                                'Exit Reason': exit_reason
                             })
                             in_position = False
                             break
-
-        # ----------------------------------------------------
-        # STRATEGY 2: Open-Percent Threshold Strategy
-        # ----------------------------------------------------
         else:
             for date, group in grouped_days:
                 if len(group) < 2:
@@ -246,15 +232,7 @@ else:
                                 exit_reason = 'EOD Close'
                             
                         if exit_price is not None:
-                            if direction == 'LONG':
-                                gross_pnl = (exit_price - entry_price) * position_size_shares
-                            else:
-                                gross_pnl = (entry_price - exit_price) * position_size_shares
-                                
-                            total_commission = commission_per_order * 2
-                            net_pnl = gross_pnl - total_commission
-                            
-                            all_trades.append({
+                            raw_trades.append({
                                 'Ticker': ticker,
                                 'Date': date,
                                 'Entry Time': entry_time,
@@ -262,28 +240,67 @@ else:
                                 'Direction': direction,
                                 'Entry Price': entry_price,
                                 'Exit Price': exit_price,
-                                'Exit Reason': exit_reason,
-                                'Gross PnL ($)': round(gross_pnl, 2),
-                                'Net PnL ($)': round(net_pnl, 2)
+                                'Exit Reason': exit_reason
                             })
                             in_position = False
                             break
 
-    trades_df = pd.DataFrame(all_trades)
-    
-    if trades_df.empty:
+    if not raw_trades:
         st.warning("No trades were triggered across any of the selected tickers using current parameters.")
     else:
-        # Sort all trades chronologically by exit time to build portfolio equity curve
-        trades_df = trades_df.sort_values(by='Exit Time').reset_index(drop=True)
+        # Step 2: Sort all trades chronologically by Entry Time to simulate dynamic equity sizing
+        trades_df = pd.DataFrame(raw_trades).sort_values(by='Entry Time').reset_index(drop=True)
+        
+        simulated_trades = []
+        cumulative_equity = 0.0  # Tracks running net PnL to determine if equity is negative
+        
+        for _, row in trades_df.iterrows():
+            # Determine allocation size based on whether running equity is negative
+            if cumulative_equity < 0:
+                trade_allocation = reduced_capital_per_trade
+                size_status = "Reduced ($8k)"
+            else:
+                trade_allocation = base_capital_per_trade
+                size_status = "Base ($10k)"
+                
+            # Calculate shares based on dollar allocation and entry price
+            shares = trade_allocation / row['Entry Price']
+            
+            # Calculate PnL
+            if row['Direction'] == 'LONG':
+                gross_pnl = (row['Exit Price'] - row['Entry Price']) * shares
+            else:
+                gross_pnl = (row['Entry Price'] - row['Exit Price']) * shares
+                
+            net_pnl = gross_pnl - commission_per_trade
+            
+            cumulative_equity += net_pnl
+            
+            simulated_trades.append({
+                'Ticker': row['Ticker'],
+                'Date': row['Date'],
+                'Entry Time': row['Entry Time'],
+                'Exit Time': row['Exit Time'],
+                'Direction': row['Direction'],
+                'Allocation Size ($)': trade_allocation,
+                'Shares': round(shares, 2),
+                'Entry Price': row['Entry Price'],
+                'Exit Price': row['Exit Price'],
+                'Exit Reason': row['Exit Reason'],
+                'Gross PnL ($)': round(gross_pnl, 2),
+                'Net PnL ($)': round(net_pnl, 2),
+                'Equity State': size_status
+            })
+            
+        final_trades_df = pd.DataFrame(simulated_trades).sort_values(by='Exit Time').reset_index(drop=True)
         
         # Portfolio Performance Metrics Display
         st.subheader("Portfolio Performance Summary")
-        total_net_pnl = trades_df['Net PnL ($)'].sum()
-        win_rate = (trades_df['Net PnL ($)'] > 0).mean() * 100
-        total_trades = len(trades_df)
-        winning_trades = len(trades_df[trades_df['Net PnL ($)'] > 0])
-        losing_trades = len(trades_df[trades_df['Net PnL ($)'] <= 0])
+        total_net_pnl = final_trades_df['Net PnL ($)'].sum()
+        win_rate = (final_trades_df['Net PnL ($)'] > 0).mean() * 100
+        total_trades = len(final_trades_df)
+        winning_trades = len(final_trades_df[final_trades_df['Net PnL ($)'] > 0])
+        losing_trades = len(final_trades_df[final_trades_df['Net PnL ($)'] <= 0])
         
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Portfolio Total Net PnL", f"${total_net_pnl:,.2f}")
@@ -293,8 +310,8 @@ else:
         
         # Breakdown: Long vs Short Portfolio PnL
         st.subheader("Directional Breakdown")
-        long_trades = trades_df[trades_df['Direction'] == 'LONG']
-        short_trades = trades_df[trades_df['Direction'] == 'SHORT']
+        long_trades = final_trades_df[final_trades_df['Direction'] == 'LONG']
+        short_trades = final_trades_df[final_trades_df['Direction'] == 'SHORT']
         
         l_col1, l_col2 = st.columns(2)
         with l_col1:
@@ -312,7 +329,7 @@ else:
 
         # Breakdown by Ticker
         st.subheader("Performance by Ticker")
-        ticker_summary = trades_df.groupby('Ticker').agg(
+        ticker_summary = final_trades_df.groupby('Ticker').agg(
             Total_Trades=('Net PnL ($)', 'count'),
             Win_Rate=('Net PnL ($)', lambda x: f"{(x > 0).mean() * 100:.1f}%"),
             Net_PnL=('Net PnL ($)', 'sum')
@@ -321,10 +338,10 @@ else:
         st.dataframe(ticker_summary, use_container_width=True)
 
         # Portfolio Equity Curve Visualization
-        trades_df['Cumulative Portfolio PnL'] = trades_df['Net PnL ($)'].cumsum()
+        final_trades_df['Cumulative Portfolio PnL'] = final_trades_df['Net PnL ($)'].cumsum()
         st.subheader("Combined Portfolio Equity Curve")
-        st.line_chart(trades_df.set_index('Exit Time')['Cumulative Portfolio PnL'])
+        st.line_chart(final_trades_df.set_index('Exit Time')['Cumulative Portfolio PnL'])
         
         # Combined Detailed Trade Log
         st.subheader("Master Trade Log")
-        st.dataframe(trades_df, use_container_width=True)
+        st.dataframe(final_trades_df, use_container_width=True)
