@@ -10,7 +10,7 @@ st.title("Multi-Stock Intraday Trading System Backtester")
 st.markdown("""
 Backtest an entire basket of stocks simultaneously using **2-minute intraday data** 
 (maximum lookback on Yahoo Finance is **60 days**), incorporating a flat **$1.00 commission per trade**. 
-Positions are sized in **dollars per trade** and dynamically shrink if portfolio equity turns negative.
+Profits and losses are tracked and reinvested **per ticker independently** using whole shares.
 """)
 
 # Sidebar Controls for Strategy Selection
@@ -23,14 +23,17 @@ strategy_type = st.sidebar.selectbox(
 # Multi-stock ticker input
 tickers_input = st.sidebar.text_input(
     "Ticker Symbols (comma-separated)", 
-    value="SPY, QQQ, AAPL, MSFT, NVDA, AMZN, GOOGL, META, TSLA, NFLX"
+    value="SPY, QQQ, AAPL, MSFT, NVDA"
 )
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
-# Dollar-based position sizing controls
-st.sidebar.header("Capital & Risk Management")
-base_capital_per_trade = st.sidebar.number_input("Starting Capital Size per Trade ($)", value=10000.0, step=1000.0)
-reduced_capital_per_trade = st.sidebar.number_input("Reduced Capital Size per Trade (if Equity < 0) ($)", value=8000.0, step=1000.0)
+# Portfolio & Capital Management
+st.sidebar.header("Capital & Position Sizing")
+total_starting_capital = st.sidebar.number_input("Total Portfolio Starting Capital ($)", value=20000.0, step=1000.0)
+num_positions = st.sidebar.number_input("Number of Active Positions / Slots", value=len(tickers), min_value=1, step=1)
+initial_capital_per_ticker = total_starting_capital / max(num_positions, 1)
+st.sidebar.markdown(f"**Initial Capital per Ticker:** ${initial_capital_per_ticker:,.2f}")
+
 commission_per_trade = 1.0  # Flat $1 commission per trade
 
 # Dynamic Sidebar Parameters Based on Strategy
@@ -61,12 +64,10 @@ def load_all_data(symbol_list):
         if not df.empty:
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-            # Timezone adjustment
             if df.index.tz is not None:
                 df.index = df.index.tz_convert('America/New_York')
             else:
                 df.index = df.index.tz_localize('UTC').tz_convert('America/New_York')
-            # Filter regular trading hours
             df = df.between_time('09:30', '16:00')
             data_dict[symbol] = df
     return data_dict
@@ -248,24 +249,28 @@ else:
     if not raw_trades:
         st.warning("No trades were triggered across any of the selected tickers using current parameters.")
     else:
-        # Step 2: Sort all trades chronologically by Entry Time to simulate dynamic equity sizing
+        # Step 2: Sort all trades chronologically by Entry Time
         trades_df = pd.DataFrame(raw_trades).sort_values(by='Entry Time').reset_index(drop=True)
         
+        # Dictionary to track rolling capital balance per ticker independently
+        ticker_equity = {t: initial_capital_per_ticker for t in tickers}
+        
         simulated_trades = []
-        cumulative_equity = 0.0  # Tracks running net PnL to determine if equity is negative
         
         for _, row in trades_df.iterrows():
-            # Determine allocation size based on whether running equity is negative
-            if cumulative_equity < 0:
-                trade_allocation = reduced_capital_per_trade
-                size_status = "Reduced ($8k)"
-            else:
-                trade_allocation = base_capital_per_trade
-                size_status = "Base ($10k)"
-                
-            # Calculate shares based on dollar allocation and entry price
-            shares = trade_allocation / row['Entry Price']
+            ticker = row['Ticker']
             
+            # Ensure ticker exists in dictionary (in case user added custom symbols)
+            if ticker not in ticker_equity:
+                ticker_equity[ticker] = initial_capital_per_ticker
+                
+            current_ticker_capital = max(ticker_equity[ticker], 100.0) # Floor capital at $100 minimum to avoid zero division
+            
+            # Calculate whole shares based on this ticker's rolling balance
+            shares = int(round(current_ticker_capital / row['Entry Price']))
+            if shares < 1:
+                shares = 1  # Force minimum 1 share if capital is low
+                
             # Calculate PnL
             if row['Direction'] == 'LONG':
                 gross_pnl = (row['Exit Price'] - row['Entry Price']) * shares
@@ -274,22 +279,23 @@ else:
                 
             net_pnl = gross_pnl - commission_per_trade
             
-            cumulative_equity += net_pnl
+            # Reinvest profits/losses into that specific ticker's balance
+            ticker_equity[ticker] += net_pnl
             
             simulated_trades.append({
-                'Ticker': row['Ticker'],
+                'Ticker': ticker,
                 'Date': row['Date'],
                 'Entry Time': row['Entry Time'],
                 'Exit Time': row['Exit Time'],
                 'Direction': row['Direction'],
-                'Allocation Size ($)': trade_allocation,
-                'Shares': round(shares, 2),
+                'Ticker Balance Before ($)': round(current_ticker_capital, 2),
+                'Shares Traded': shares,
                 'Entry Price': row['Entry Price'],
                 'Exit Price': row['Exit Price'],
                 'Exit Reason': row['Exit Reason'],
                 'Gross PnL ($)': round(gross_pnl, 2),
                 'Net PnL ($)': round(net_pnl, 2),
-                'Equity State': size_status
+                'Ticker Balance After ($)': round(ticker_equity[ticker], 2)
             })
             
         final_trades_df = pd.DataFrame(simulated_trades).sort_values(by='Exit Time').reset_index(drop=True)
@@ -306,7 +312,7 @@ else:
         col1.metric("Portfolio Total Net PnL", f"${total_net_pnl:,.2f}")
         col2.metric("Portfolio Win Rate", f"{win_rate:.1f}%")
         col3.metric("Total Trades Executed", total_trades)
-        col4.metric("Wins / Losses", f"{winning_trades} / {losing_trades}")
+        col4.metric("Wins / Losses", f"${winning_trades} / {losing_trades}".replace('$', ''))
         
         # Breakdown: Long vs Short Portfolio PnL
         st.subheader("Directional Breakdown")
@@ -327,14 +333,16 @@ else:
             else:
                 st.info("No short trades.")
 
-        # Breakdown by Ticker
-        st.subheader("Performance by Ticker")
+        # Breakdown by Ticker (Showing Ending Balance per Ticker)
+        st.subheader("Performance & Reinvestment Breakdown by Ticker")
         ticker_summary = final_trades_df.groupby('Ticker').agg(
             Total_Trades=('Net PnL ($)', 'count'),
             Win_Rate=('Net PnL ($)', lambda x: f"{(x > 0).mean() * 100:.1f}%"),
-            Net_PnL=('Net PnL ($)', 'sum')
+            Net_PnL=('Net PnL ($)', 'sum'),
+            Ending_Balance=('Ticker Balance After ($)', 'last')
         ).reset_index()
         ticker_summary['Net_PnL'] = ticker_summary['Net_PnL'].apply(lambda x: f"${x:,.2f}")
+        ticker_summary['Ending_Balance'] = ticker_summary['Ending_Balance'].apply(lambda x: f"${x:,.2f}")
         st.dataframe(ticker_summary, use_container_width=True)
 
         # Portfolio Equity Curve Visualization
