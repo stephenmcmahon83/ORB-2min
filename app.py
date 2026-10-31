@@ -3,44 +3,54 @@ import pandas as pd
 import numpy as np
 
 # Page Configuration
-st.set_page_config(page_title="SPY CSV ORB Backtester", layout="wide")
+st.set_page_config(page_title="High/Low Breakout ORB & Threshold Backtester", layout="wide")
 
-st.title("Opening Range Breakout (ORB) Strategy Backtester")
+st.title("Intraday High/Low Breakout Strategy Backtester")
 st.markdown("""
-Upload your 1-minute SPY CSV file. This version flexible-starts trading on the **first available bar** of each day, 
-bypassing strict 9:30 AM grid requirements so your dataset generates results.
+Upload your 1-minute SPY CSV file. This version triggers entries when the **High** or **Low** breaches 
+opening ranges (by 1 tick) or percentage thresholds, rather than waiting for bar closes.
 """)
 
 # Sidebar Controls
 st.sidebar.header("1. Data Upload")
 uploaded_file = st.sidebar.file_uploader("Upload SPY CSV File", type=["csv"])
 
-st.sidebar.header("2. Capital & Execution")
+st.sidebar.header("2. Strategy Selection")
+strategy_type = st.sidebar.selectbox(
+    "Choose Strategy", 
+    options=["Opening Range Breakout (ORB)", "Open-Percent Threshold Strategy"]
+)
+
+st.sidebar.header("3. Capital & Execution")
 starting_capital = st.sidebar.number_input("Starting Capital ($)", value=20000.0, step=1000.0)
 commission_per_trade = st.sidebar.number_input("Commission per Trade ($)", value=1.0, step=0.25, format="%.2f")
 
 # Strategy Parameters
-st.sidebar.header("3. Strategy Parameters")
-or_minutes = st.sidebar.slider("Opening Range Duration (Minutes)", min_value=1, max_value=60, value=15, step=1)
-exit_mode = st.sidebar.selectbox("Exit Mode", options=["Profit Target (%)", "Hold for X Bars"])
+st.sidebar.header("4. Strategy Parameters")
+if strategy_type == "Opening Range Breakout (ORB)":
+    or_minutes = st.sidebar.slider("Opening Range Duration (Minutes)", min_value=1, max_value=60, value=15, step=1)
+    exit_mode = st.sidebar.selectbox("Exit Mode", options=["Profit Target (%)", "Hold for X Bars"])
+    
+    stop_loss_type = st.sidebar.selectbox(
+        "Stop Loss Rule", 
+        options=["Fixed Percentage (%)", "Opening Range Boundary (OR Low/High ± 1 tick)"]
+    )
+    if stop_loss_type == "Fixed Percentage (%)":
+        stop_loss_pct = st.sidebar.slider("Stop Loss (%)", min_value=0.25, max_value=3.00, value=0.50, step=0.25)
+    else:
+        stop_loss_pct = 0.0
 
-# Stop Loss Rule Configuration
-stop_loss_type = st.sidebar.selectbox(
-    "Stop Loss Rule", 
-    options=["Fixed Percentage (%)", "Opening Range Boundary (OR Low/High ± 1 tick)"]
-)
-
-if stop_loss_type == "Fixed Percentage (%)":
-    stop_loss_pct = st.sidebar.slider("Stop Loss (%)", min_value=0.25, max_value=3.00, value=0.50, step=0.25)
+    if exit_mode == "Profit Target (%)":
+        profit_target_pct = st.sidebar.slider("Profit Target (%)", min_value=0.25, max_value=3.00, value=1.00, step=0.25)
+        holding_bars = 0
+    else:
+        profit_target_pct = 0.0
+        holding_bars = st.sidebar.slider("Holding Bars (1-min intervals)", min_value=1, max_value=240, value=10, step=1)
 else:
-    stop_loss_pct = 0.0
-
-if exit_mode == "Profit Target (%)":
+    trade_direction = st.sidebar.selectbox("Trade Direction", options=["Both (Long & Short)", "Long Only", "Short Only"])
+    entry_threshold_pct = st.sidebar.slider("Entry Threshold (% from Open)", min_value=0.05, max_value=2.0, value=0.25, step=0.05)
     profit_target_pct = st.sidebar.slider("Profit Target (%)", min_value=0.25, max_value=3.00, value=1.00, step=0.25)
-    holding_bars = 0
-else:
-    profit_target_pct = 0.0
-    holding_bars = st.sidebar.slider("Holding Bars (1-min intervals)", min_value=1, max_value=240, value=10, step=1)
+    stop_loss_pct = st.sidebar.slider("Stop Loss (%)", min_value=0.25, max_value=3.00, value=0.50, step=0.25)
 
 if uploaded_file is not None:
     try:
@@ -85,123 +95,199 @@ if uploaded_file is not None:
     df = df.between_time('09:30', '16:00')
     
     if df.empty:
-        st.error("No data remaining after filtering for regular trading hours. Check your timestamp formatting.")
+        st.error("No data remaining after filtering for regular trading hours.")
         st.stop()
 
     raw_trades = []
-    num_or_bars = or_minutes  # Number of 1-min bars for the opening range
-    
     grouped_days = df.groupby(df.index.date)
     days_backtested = 0
     
     for date, group in grouped_days:
         group = group[~group.index.duplicated(keep='first')]
         
-        # Ensure there are enough bars in the day to form an opening range + at least 1 trade bar
-        if len(group) < num_or_bars + 1:
-            continue
+        if strategy_type == "Opening Range Breakout (ORB)":
+            num_or_bars = or_minutes
+            if len(group) < num_or_bars + 1:
+                continue
             
-        days_backtested += 1
-        
-        or_slice = group.iloc[:num_or_bars]
-        or_high = or_slice['High'].max()
-        or_low = or_slice['Low'].min()
-        
-        trading_slice = group.iloc[num_or_bars:]
-        in_position = False
-        entry_price = 0.0
-        entry_time = None
-        direction = None 
-        target_price = 0.0
-        stop_price = 0.0
-        bars_held = 0
-        
-        for i in range(len(trading_slice)):
-            bar = trading_slice.iloc[i]
-            bar_time = trading_slice.index[i]
-            close = bar['Close']
-            high = bar['High']
-            low = bar['Low']
+            days_backtested += 1
+            or_slice = group.iloc[:num_or_bars]
+            or_high = or_slice['High'].max()
+            or_low = or_slice['Low'].min()
             
-            if not in_position:
-                if close > or_high:
-                    in_position = True
-                    direction = 'LONG'
-                    entry_price = close
-                    entry_time = bar_time
-                    
-                    if stop_loss_type == "Fixed Percentage (%)":
-                        stop_price = entry_price * (1 - stop_loss_pct / 100.0)
-                    else:
-                        stop_price = or_low - 0.01
+            trading_slice = group.iloc[num_or_bars:]
+            in_position = False
+            entry_price = 0.0
+            entry_time = None
+            direction = None 
+            target_price = 0.0
+            stop_price = 0.0
+            bars_held = 0
+            
+            for i in range(len(trading_slice)):
+                bar = trading_slice.iloc[i]
+                bar_time = trading_slice.index[i]
+                high = bar['High']
+                low = bar['Low']
+                close = bar['Close']
+                
+                if not in_position:
+                    # Long Entry: High breaks OR High + 1 tick ($0.01)
+                    if high >= or_high + 0.01:
+                        in_position = True
+                        direction = 'LONG'
+                        entry_price = or_high + 0.01  # Fill at breakout price
+                        entry_time = bar_time
                         
-                    if exit_mode == "Profit Target (%)":
+                        if stop_loss_type == "Fixed Percentage (%)":
+                            stop_price = entry_price * (1 - stop_loss_pct / 100.0)
+                        else:
+                            stop_price = or_low - 0.01
+                            
+                        if exit_mode == "Profit Target (%)":
+                            target_price = entry_price * (1 + profit_target_pct / 100.0)
+                        bars_held = 0
+                        
+                    # Short Entry: Low breaks OR Low - 1 tick ($0.01)
+                    elif low <= or_low - 0.01:
+                        in_position = True
+                        direction = 'SHORT'
+                        entry_price = or_low - 0.01  # Fill at breakout price
+                        entry_time = bar_time
+                        
+                        if stop_loss_type == "Fixed Percentage (%)":
+                            stop_price = entry_price * (1 + stop_loss_pct / 100.0)
+                        else:
+                            stop_price = or_high + 0.01
+                            
+                        if exit_mode == "Profit Target (%)":
+                            target_price = entry_price * (1 - profit_target_pct / 100.0)
+                        bars_held = 0
+                else:
+                    bars_held += 1
+                    exit_price = None
+                    exit_reason = None
+                    
+                    if direction == 'LONG':
+                        if low <= stop_price:
+                            exit_price = stop_price
+                            exit_reason = 'Stop Loss'
+                        elif exit_mode == "Profit Target (%)" and high >= target_price:
+                            exit_price = target_price
+                            exit_reason = 'Profit Target'
+                        elif exit_mode == "Hold for X Bars" and bars_held >= holding_bars:
+                            exit_price = close
+                            exit_reason = f'Bar Count ({holding_bars})'
+                        elif i == len(trading_slice) - 1:
+                            exit_price = close
+                            exit_reason = 'EOD Close'
+                    elif direction == 'SHORT':
+                        if high >= stop_price:
+                            exit_price = stop_price
+                            exit_reason = 'Stop Loss'
+                        elif exit_mode == "Profit Target (%)" and low <= target_price:
+                            exit_price = target_price
+                            exit_reason = 'Profit Target'
+                        elif exit_mode == "Hold for X Bars" and bars_held >= holding_bars:
+                            exit_price = close
+                            exit_reason = f'Bar Count ({holding_bars})'
+                        elif i == len(trading_slice) - 1:
+                            exit_price = close
+                            exit_reason = 'EOD Close'
+                    
+                    if exit_price is not None:
+                        raw_trades.append({
+                            'Date': date,
+                            'Entry Time': entry_time,
+                            'Exit Time': bar_time,
+                            'Direction': direction,
+                            'Entry Price': entry_price,
+                            'Exit Price': exit_price,
+                            'Exit Reason': exit_reason
+                        })
+                        in_position = False
+                        break
+        else:
+            # Open-Percent Threshold Strategy
+            if len(group) < 2:
+                continue
+            
+            days_backtested += 1
+            day_open = group.iloc[0]['Open']
+            in_position = False
+            entry_price = 0.0
+            entry_time = None
+            direction = None
+            target_price = 0.0
+            stop_price = 0.0
+            
+            for i in range(len(group)):
+                bar = group.iloc[i]
+                bar_time = group.index[i]
+                high = bar['High']
+                low = bar['Low']
+                close = bar['Close']
+                
+                long_trigger_price = day_open * (1 + entry_threshold_pct / 100.0)
+                short_trigger_price = day_open * (1 - entry_threshold_pct / 100.0)
+                
+                if not in_position:
+                    if trade_direction in ["Both (Long & Short)", "Long Only"] and high >= long_trigger_price:
+                        in_position = True
+                        direction = 'LONG'
+                        entry_price = long_trigger_price
+                        entry_time = bar_time
                         target_price = entry_price * (1 + profit_target_pct / 100.0)
-                    bars_held = 0
-                    
-                elif close < or_low:
-                    in_position = True
-                    direction = 'SHORT'
-                    entry_price = close
-                    entry_time = bar_time
-                    
-                    if stop_loss_type == "Fixed Percentage (%)":
-                        stop_price = entry_price * (1 + stop_loss_pct / 100.0)
-                    else:
-                        stop_price = or_high + 0.01
-                        
-                    if exit_mode == "Profit Target (%)":
+                        stop_price = entry_price * (1 - stop_loss_pct / 100.0)
+                    elif trade_direction in ["Both (Long & Short)", "Short Only"] and low <= short_trigger_price:
+                        in_position = True
+                        direction = 'SHORT'
+                        entry_price = short_trigger_price
+                        entry_time = bar_time
                         target_price = entry_price * (1 - profit_target_pct / 100.0)
-                    bars_held = 0
-            else:
-                bars_held += 1
-                exit_price = None
-                exit_reason = None
-                
-                if direction == 'LONG':
-                    if low <= stop_price:
-                        exit_price = stop_price
-                        exit_reason = 'Stop Loss'
-                    elif exit_mode == "Profit Target (%)" and high >= target_price:
-                        exit_price = target_price
-                        exit_reason = 'Profit Target'
-                    elif exit_mode == "Hold for X Bars" and bars_held >= holding_bars:
-                        exit_price = close
-                        exit_reason = f'Bar Count ({holding_bars})'
-                    elif i == len(trading_slice) - 1:
-                        exit_price = close
-                        exit_reason = 'EOD Close'
-                elif direction == 'SHORT':
-                    if high >= stop_price:
-                        exit_price = stop_price
-                        exit_reason = 'Stop Loss'
-                    elif exit_mode == "Profit Target (%)" and low <= target_price:
-                        exit_price = target_price
-                        exit_reason = 'Profit Target'
-                    elif exit_mode == "Hold for X Bars" and bars_held >= holding_bars:
-                        exit_price = close
-                        exit_reason = f'Bar Count ({holding_bars})'
-                    elif i == len(trading_slice) - 1:
-                        exit_price = close
-                        exit_reason = 'EOD Close'
-                
-                if exit_price is not None:
-                    raw_trades.append({
-                        'Date': date,
-                        'Entry Time': entry_time,
-                        'Exit Time': bar_time,
-                        'Direction': direction,
-                        'Entry Price': entry_price,
-                        'Exit Price': exit_price,
-                        'Exit Reason': exit_reason
-                    })
-                    in_position = False
-                    break
+                        stop_price = entry_price * (1 + stop_loss_pct / 100.0)
+                else:
+                    exit_price = None
+                    exit_reason = None
+                    
+                    if direction == 'LONG':
+                        if low <= stop_price:
+                            exit_price = stop_price
+                            exit_reason = 'Stop Loss'
+                        elif high >= target_price:
+                            exit_price = target_price
+                            exit_reason = 'Profit Target'
+                        elif i == len(group) - 1:
+                            exit_price = close
+                            exit_reason = 'EOD Close'
+                    elif direction == 'SHORT':
+                        if high >= stop_price:
+                            exit_price = stop_price
+                            exit_reason = 'Stop Loss'
+                        elif low <= target_price:
+                            exit_price = target_price
+                            exit_reason = 'Profit Target'
+                        elif i == len(group) - 1:
+                            exit_price = close
+                            exit_reason = 'EOD Close'
+                            
+                    if exit_price is not None:
+                        raw_trades.append({
+                            'Date': date,
+                            'Entry Time': entry_time,
+                            'Exit Time': bar_time,
+                            'Direction': direction,
+                            'Entry Price': entry_price,
+                            'Exit Price': exit_price,
+                            'Exit Reason': exit_reason
+                        })
+                        in_position = False
+                        break
 
     st.success(f"Successfully backtested **{days_backtested} trading days** from your uploaded file!")
 
     if not raw_trades:
-        st.warning("No trades were triggered using the current parameters. Try adjusting your Opening Range duration, stop loss, or profit target.")
+        st.warning("No trades were triggered using the current parameters. Try adjusting your thresholds.")
     else:
         trades_df = pd.DataFrame(raw_trades).sort_values(by='Entry Time').reset_index(drop=True)
         
