@@ -8,7 +8,7 @@ st.set_page_config(page_title="ORB Strategy Backtester with Sizing Modes", layou
 st.title("Intraday Strategy Backtester (Configurable Sizing & Triggers)")
 st.markdown("""
 Upload your 1-minute SPY CSV file. Choose between compounding profit reinvestment or a fixed size 
-that shrinks on losses but doesn't scale up on profits.
+that shrinks on losses but doesn't scale up on profits. Holding bars can now extend to the end of the day.
 """)
 
 # Sidebar Controls
@@ -62,7 +62,8 @@ if strategy_type == "Opening Range Breakout (ORB)":
         holding_bars = 0
     else:
         profit_target_pct = 0.0
-        holding_bars = st.sidebar.slider("Holding Bars (1-min intervals)", min_value=1, max_value=240, value=10, step=1)
+        # Expanded holding bars range up to 400 (covering final bar of the day)
+        holding_bars = st.sidebar.slider("Holding Bars (1-min intervals)", min_value=1, max_value=400, value=10, step=1)
 else:
     trade_direction = st.sidebar.selectbox("Trade Direction", options=["Both (Long & Short)", "Long Only", "Short Only"])
     entry_threshold_pct = st.sidebar.slider("Entry Threshold (% from Open)", min_value=0.05, max_value=2.0, value=0.25, step=0.05)
@@ -122,12 +123,14 @@ if uploaded_file is not None:
     for date, group in grouped_days:
         group = group[~group.index.duplicated(keep='first')]
         
+        min_required_bars = (or_minutes + 1) if strategy_type == "Opening Range Breakout (ORB)" else 2
+        if len(group) < min_required_bars:
+            continue
+            
+        days_backtested += 1
+        
         if strategy_type == "Opening Range Breakout (ORB)":
             num_or_bars = or_minutes
-            if len(group) < num_or_bars + 1:
-                continue
-            
-            days_backtested += 1
             or_slice = group.iloc[:num_or_bars]
             or_high = or_slice['High'].max()
             or_low = or_slice['Low'].min()
@@ -200,7 +203,7 @@ if uploaded_file is not None:
                         elif exit_mode == "Hold for X Bars" and bars_held >= holding_bars:
                             exit_price = close
                             exit_reason = f'Bar Count ({holding_bars})'
-                        elif i == len(trading_slice) - 1:
+                        elif i == len(trading_slice) - 1: # Absolute fallback: Force close on final bar of the day
                             exit_price = close
                             exit_reason = 'EOD Close'
                     elif direction == 'SHORT':
@@ -213,7 +216,7 @@ if uploaded_file is not None:
                         elif exit_mode == "Hold for X Bars" and bars_held >= holding_bars:
                             exit_price = close
                             exit_reason = f'Bar Count ({holding_bars})'
-                        elif i == len(trading_slice) - 1:
+                        elif i == len(trading_slice) - 1: # Absolute fallback: Force close on final bar of the day
                             exit_price = close
                             exit_reason = 'EOD Close'
                     
@@ -231,10 +234,6 @@ if uploaded_file is not None:
                         break
         else:
             # Open-Percent Threshold Strategy
-            if len(group) < 2:
-                continue
-            
-            days_backtested += 1
             day_open = group.iloc[0]['Open']
             in_position = False
             entry_price = 0.0
@@ -324,10 +323,9 @@ if uploaded_file is not None:
         simulated_trades = []
         
         for _, row in trades_df.iterrows():
-            # Apply position sizing logic based on user's toggle
             if position_sizing_mode == "Compounding (Reinvest Profits)":
                 capital_to_risk = max(current_equity, 100.0)
-            else:  # Fixed size capped at start, shrinks on losses
+            else:
                 capital_to_risk = max(min(current_equity, starting_capital), 100.0)
                 
             shares = int(round(capital_to_risk / row['Entry Price']))
