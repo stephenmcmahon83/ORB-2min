@@ -3,12 +3,12 @@ import pandas as pd
 import numpy as np
 
 # Page Configuration
-st.set_page_config(page_title="ORB & Threshold Strategy Backtester", layout="wide")
+st.set_page_config(page_title="ORB Strategy Backtester with Sizing Modes", layout="wide")
 
-st.title("Intraday Strategy Backtester (Configurable Triggers)")
+st.title("Intraday Strategy Backtester (Configurable Sizing & Triggers)")
 st.markdown("""
-Upload your 1-minute SPY CSV file. Use the sidebar to toggle between **High/Low Breakout** triggers 
-and the traditional **Bar Close** triggers.
+Upload your 1-minute SPY CSV file. Choose between compounding profit reinvestment or a fixed size 
+that shrinks on losses but doesn't scale up on profits.
 """)
 
 # Sidebar Controls
@@ -21,7 +21,6 @@ strategy_type = st.sidebar.selectbox(
     options=["Opening Range Breakout (ORB)", "Open-Percent Threshold Strategy"]
 )
 
-# The requested toggle for old vs new trigger types
 trigger_mode = st.sidebar.selectbox(
     "Trigger Mode",
     options=[
@@ -30,9 +29,18 @@ trigger_mode = st.sidebar.selectbox(
     ]
 )
 
-st.sidebar.header("3. Capital & Execution")
+st.sidebar.header("3. Capital & Position Sizing")
 starting_capital = st.sidebar.number_input("Starting Capital ($)", value=20000.0, step=1000.0)
 commission_per_trade = st.sidebar.number_input("Commission per Trade ($)", value=1.0, step=0.25, format="%.2f")
+
+# The requested position sizing toggle
+position_sizing_mode = st.sidebar.selectbox(
+    "Position Sizing Mode",
+    options=[
+        "Compounding (Reinvest Profits)",
+        "Fixed Size (Capped at Start, Shrinks on Losses)"
+    ]
+)
 
 # Strategy Parameters
 st.sidebar.header("4. Strategy Parameters")
@@ -316,7 +324,12 @@ if uploaded_file is not None:
         simulated_trades = []
         
         for _, row in trades_df.iterrows():
-            capital_to_risk = max(current_equity, 100.0)
+            # Apply position sizing logic based on user's toggle
+            if position_sizing_mode == "Compounding (Reinvest Profits)":
+                capital_to_risk = max(current_equity, 100.0)
+            else:  # Fixed size capped at start, shrinks on losses
+                capital_to_risk = max(min(current_equity, starting_capital), 100.0)
+                
             shares = int(round(capital_to_risk / row['Entry Price']))
             if shares < 1:
                 shares = 1
@@ -334,6 +347,7 @@ if uploaded_file is not None:
                 'Entry Time': row['Entry Time'],
                 'Exit Time': row['Exit Time'],
                 'Direction': row['Direction'],
+                'Allocation Size ($)': round(capital_to_risk, 2),
                 'Shares': shares,
                 'Entry Price': row['Entry Price'],
                 'Exit Price': row['Exit Price'],
