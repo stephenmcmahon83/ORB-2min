@@ -3,17 +3,17 @@ import pandas as pd
 import numpy as np
 
 # Page Configuration
-st.set_page_config(page_title="Fast Intraday ORB Backtester", layout="wide")
+st.set_page_config(page_title="ORB Strategy Backtester with Sizing Modes", layout="wide")
 
-st.title("Opening Range Breakout (ORB) Strategy Backtester")
+st.title("Intraday Strategy Backtester (Configurable Sizing & Triggers)")
 st.markdown("""
-A lightning-fast, single-pass intraday backtester using your uploaded 1-minute SPY dataset, 
-gap filtering, configurable triggers, stop loss rules, and position sizing modes.
+Upload your 1-minute SPY CSV file. Choose between compounding profit reinvestment or a fixed size 
+that shrinks on losses but doesn't scale up on profits.
 """)
 
 # Sidebar Controls
 st.sidebar.header("1. Data Upload")
-uploaded_file = st.sidebar.file_uploader("Upload SPY CSV File", type=["csv", "xlsx", "xls"])
+uploaded_file = st.sidebar.file_uploader("Upload SPY CSV File", type=["csv"])
 
 st.sidebar.header("2. Strategy & Trigger Mode")
 strategy_type = st.sidebar.selectbox(
@@ -33,6 +33,7 @@ st.sidebar.header("3. Capital & Position Sizing")
 starting_capital = st.sidebar.number_input("Starting Capital ($)", value=20000.0, step=1000.0)
 commission_per_trade = st.sidebar.number_input("Commission per Trade ($)", value=1.0, step=0.25, format="%.2f")
 
+# The requested position sizing toggle
 position_sizing_mode = st.sidebar.selectbox(
     "Position Sizing Mode",
     options=[
@@ -47,11 +48,11 @@ if strategy_type == "Opening Range Breakout (ORB)":
     or_minutes = st.sidebar.slider("Opening Range Duration (Minutes)", min_value=1, max_value=60, value=15, step=1)
     exit_mode = st.sidebar.selectbox("Exit Mode", options=["Profit Target (%)", "Hold for X Bars"])
     
-    stop_loss_rule = st.sidebar.selectbox(
+    stop_loss_type = st.sidebar.selectbox(
         "Stop Loss Rule", 
         options=["Fixed Percentage (%)", "Opening Range Boundary (OR Low/High ± 1 tick)"]
     )
-    if stop_loss_rule == "Fixed Percentage (%)":
+    if stop_loss_type == "Fixed Percentage (%)":
         stop_loss_pct = st.sidebar.slider("Stop Loss (%)", min_value=0.25, max_value=3.00, value=0.50, step=0.25)
     else:
         stop_loss_pct = 0.0
@@ -67,18 +68,17 @@ else:
     entry_threshold_pct = st.sidebar.slider("Entry Threshold (% from Open)", min_value=0.05, max_value=2.0, value=0.25, step=0.05)
     profit_target_pct = st.sidebar.slider("Profit Target (%)", min_value=0.25, max_value=3.00, value=1.00, step=0.25)
     stop_loss_pct = st.sidebar.slider("Stop Loss (%)", min_value=0.25, max_value=3.00, value=0.50, step=0.25)
-    stop_loss_rule = "Fixed Percentage (%)"
 
 if uploaded_file is not None:
     try:
-        file_extension = uploaded_file.name.split('.')[-1].lower()
-        if file_extension == 'csv':
-            df = pd.read_csv(uploaded_file, sep=None, engine='python')
-        else:
-            df = pd.read_excel(uploaded_file)
+        df = pd.read_csv(uploaded_file, sep=None, engine='python')
     except Exception as e:
-        st.error(f"Error reading data file: {e}")
+        st.error(f"Error reading CSV file: {e}")
         st.stop()
+
+    with st.expander("🔍 View Raw Uploaded Data Preview"):
+        st.write("Detected Columns:", list(df.columns))
+        st.dataframe(df.head(), use_container_width=True)
 
     try:
         datetime_col_name = df.columns[0]
@@ -117,36 +117,22 @@ if uploaded_file is not None:
 
     raw_trades = []
     grouped_days = df.groupby(df.index.date)
-    skipped_days_count = 0
-    total_days_processed = 0
+    days_backtested = 0
     
     for date, group in grouped_days:
-        total_days_processed += 1
         group = group[~group.index.duplicated(keep='first')]
-        
-        # Gap check: ensure continuous minutes & full session bounds
-        if len(group) > 0:
-            expected_index = pd.date_range(start=group.index[0], end=group.index[-1], freq='1min')
-            reindexed_group = group.reindex(expected_index)
-            
-            if reindexed_group['Close'].isna().any() or len(group) < 390:
-                skipped_days_count += 1
-                continue
-            clean_group = reindexed_group
-        else:
-            skipped_days_count += 1
-            continue
         
         if strategy_type == "Opening Range Breakout (ORB)":
             num_or_bars = or_minutes
-            if len(clean_group) < num_or_bars + 1:
+            if len(group) < num_or_bars + 1:
                 continue
             
-            or_slice = clean_group.iloc[:num_or_bars]
+            days_backtested += 1
+            or_slice = group.iloc[:num_or_bars]
             or_high = or_slice['High'].max()
             or_low = or_slice['Low'].min()
             
-            trading_slice = clean_group.iloc[num_or_bars:]
+            trading_slice = group.iloc[num_or_bars:]
             in_position = False
             entry_price = 0.0
             entry_time = None
@@ -166,7 +152,7 @@ if uploaded_file is not None:
                     if trigger_mode == "High/Low Breakout (High/Low crosses threshold)":
                         long_condition = (high >= or_high + 0.01)
                         short_condition = (low <= or_low - 0.01)
-                    else:
+                    else:  # Bar Close Trigger
                         long_condition = (close > or_high)
                         short_condition = (close < or_low)
 
@@ -176,7 +162,7 @@ if uploaded_file is not None:
                         entry_price = (or_high + 0.01) if "High/Low" in trigger_mode else close
                         entry_time = bar_time
                         
-                        if stop_loss_rule == "Fixed Percentage (%)":
+                        if stop_loss_type == "Fixed Percentage (%)":
                             stop_price = entry_price * (1 - stop_loss_pct / 100.0)
                         else:
                             stop_price = or_low - 0.01
@@ -191,7 +177,7 @@ if uploaded_file is not None:
                         entry_price = (or_low - 0.01) if "High/Low" in trigger_mode else close
                         entry_time = bar_time
                         
-                        if stop_loss_rule == "Fixed Percentage (%)":
+                        if stop_loss_type == "Fixed Percentage (%)":
                             stop_price = entry_price * (1 + stop_loss_pct / 100.0)
                         else:
                             stop_price = or_high + 0.01
@@ -245,10 +231,11 @@ if uploaded_file is not None:
                         break
         else:
             # Open-Percent Threshold Strategy
-            if len(clean_group) < 2:
+            if len(group) < 2:
                 continue
             
-            day_open = clean_group.iloc[0]['Open']
+            days_backtested += 1
+            day_open = group.iloc[0]['Open']
             in_position = False
             entry_price = 0.0
             entry_time = None
@@ -259,9 +246,9 @@ if uploaded_file is not None:
             long_trigger_val = day_open * (1 + entry_threshold_pct / 100.0)
             short_trigger_val = day_open * (1 - entry_threshold_pct / 100.0)
             
-            for i in range(len(clean_group)):
-                bar = clean_group.iloc[i]
-                bar_time = clean_group.index[i]
+            for i in range(len(group)):
+                bar = group.iloc[i]
+                bar_time = group.index[i]
                 high = bar['High']
                 low = bar['Low']
                 close = bar['Close']
@@ -299,7 +286,7 @@ if uploaded_file is not None:
                         elif high >= target_price:
                             exit_price = target_price
                             exit_reason = 'Profit Target'
-                        elif i == len(clean_group) - 1:
+                        elif i == len(group) - 1:
                             exit_price = close
                             exit_reason = 'EOD Close'
                     elif direction == 'SHORT':
@@ -309,7 +296,7 @@ if uploaded_file is not None:
                         elif low <= target_price:
                             exit_price = target_price
                             exit_reason = 'Profit Target'
-                        elif i == len(clean_group) - 1:
+                        elif i == len(group) - 1:
                             exit_price = close
                             exit_reason = 'EOD Close'
                             
@@ -326,10 +313,10 @@ if uploaded_file is not None:
                         in_position = False
                         break
 
-    st.info(f"🔍 **Data Quality Filter Report:** Processed {total_days_processed} total calendar days. Omitted **{skipped_days_count} days** due to missing minute gaps or incomplete sessions. Backtested **{total_days_processed - skipped_days_count} clean days**.")
+    st.success(f"Successfully backtested **{days_backtested} trading days** from your uploaded file!")
 
     if not raw_trades:
-        st.warning("No trades were triggered using the current parameters and filtered dataset.")
+        st.warning("No trades were triggered using the current parameters. Try adjusting your thresholds.")
     else:
         trades_df = pd.DataFrame(raw_trades).sort_values(by='Entry Time').reset_index(drop=True)
         
@@ -337,9 +324,10 @@ if uploaded_file is not None:
         simulated_trades = []
         
         for _, row in trades_df.iterrows():
+            # Apply position sizing logic based on user's toggle
             if position_sizing_mode == "Compounding (Reinvest Profits)":
                 capital_to_risk = max(current_equity, 100.0)
-            else:
+            else:  # Fixed size capped at start, shrinks on losses
                 capital_to_risk = max(min(current_equity, starting_capital), 100.0)
                 
             shares = int(round(capital_to_risk / row['Entry Price']))
@@ -415,4 +403,4 @@ if uploaded_file is not None:
         st.subheader("Master Trade Log")
         st.dataframe(final_trades_df, use_container_width=True)
 else:
-    st.info("👈 Please upload your SPY dataset using the sidebar file uploader to begin.")
+    st.info("👈 Please upload your SPY CSV file using the sidebar file uploader to begin.")
