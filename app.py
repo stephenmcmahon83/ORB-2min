@@ -3,22 +3,31 @@ import pandas as pd
 import numpy as np
 
 # Page Configuration
-st.set_page_config(page_title="High/Low Breakout ORB & Threshold Backtester", layout="wide")
+st.set_page_config(page_title="ORB & Threshold Strategy Backtester", layout="wide")
 
-st.title("Intraday High/Low Breakout Strategy Backtester")
+st.title("Intraday Strategy Backtester (Configurable Triggers)")
 st.markdown("""
-Upload your 1-minute SPY CSV file. This version triggers entries when the **High** or **Low** breaches 
-opening ranges (by 1 tick) or percentage thresholds, rather than waiting for bar closes.
+Upload your 1-minute SPY CSV file. Use the sidebar to toggle between **High/Low Breakout** triggers 
+and the traditional **Bar Close** triggers.
 """)
 
 # Sidebar Controls
 st.sidebar.header("1. Data Upload")
 uploaded_file = st.sidebar.file_uploader("Upload SPY CSV File", type=["csv"])
 
-st.sidebar.header("2. Strategy Selection")
+st.sidebar.header("2. Strategy & Trigger Mode")
 strategy_type = st.sidebar.selectbox(
     "Choose Strategy", 
     options=["Opening Range Breakout (ORB)", "Open-Percent Threshold Strategy"]
+)
+
+# The requested toggle for old vs new trigger types
+trigger_mode = st.sidebar.selectbox(
+    "Trigger Mode",
+    options=[
+        "High/Low Breakout (High/Low crosses threshold)", 
+        "Bar Close Trigger (Close crosses threshold)"
+    ]
 )
 
 st.sidebar.header("3. Capital & Execution")
@@ -132,11 +141,17 @@ if uploaded_file is not None:
                 close = bar['Close']
                 
                 if not in_position:
-                    # Long Entry: High breaks OR High + 1 tick ($0.01)
-                    if high >= or_high + 0.01:
+                    if trigger_mode == "High/Low Breakout (High/Low crosses threshold)":
+                        long_condition = (high >= or_high + 0.01)
+                        short_condition = (low <= or_low - 0.01)
+                    else:  # Bar Close Trigger
+                        long_condition = (close > or_high)
+                        short_condition = (close < or_low)
+
+                    if long_condition:
                         in_position = True
                         direction = 'LONG'
-                        entry_price = or_high + 0.01  # Fill at breakout price
+                        entry_price = (or_high + 0.01) if "High/Low" in trigger_mode else close
                         entry_time = bar_time
                         
                         if stop_loss_type == "Fixed Percentage (%)":
@@ -148,11 +163,10 @@ if uploaded_file is not None:
                             target_price = entry_price * (1 + profit_target_pct / 100.0)
                         bars_held = 0
                         
-                    # Short Entry: Low breaks OR Low - 1 tick ($0.01)
-                    elif low <= or_low - 0.01:
+                    elif short_condition:
                         in_position = True
                         direction = 'SHORT'
-                        entry_price = or_low - 0.01  # Fill at breakout price
+                        entry_price = (or_low - 0.01) if "High/Low" in trigger_mode else close
                         entry_time = bar_time
                         
                         if stop_loss_type == "Fixed Percentage (%)":
@@ -221,6 +235,9 @@ if uploaded_file is not None:
             target_price = 0.0
             stop_price = 0.0
             
+            long_trigger_val = day_open * (1 + entry_threshold_pct / 100.0)
+            short_trigger_val = day_open * (1 - entry_threshold_pct / 100.0)
+            
             for i in range(len(group)):
                 bar = group.iloc[i]
                 bar_time = group.index[i]
@@ -228,21 +245,25 @@ if uploaded_file is not None:
                 low = bar['Low']
                 close = bar['Close']
                 
-                long_trigger_price = day_open * (1 + entry_threshold_pct / 100.0)
-                short_trigger_price = day_open * (1 - entry_threshold_pct / 100.0)
-                
                 if not in_position:
-                    if trade_direction in ["Both (Long & Short)", "Long Only"] and high >= long_trigger_price:
+                    if trigger_mode == "High/Low Breakout (High/Low crosses threshold)":
+                        long_cond = (high >= long_trigger_val)
+                        short_cond = (low <= short_trigger_val)
+                    else:
+                        long_cond = (close >= long_trigger_val)
+                        short_cond = (close <= short_trigger_val)
+
+                    if trade_direction in ["Both (Long & Short)", "Long Only"] and long_cond:
                         in_position = True
                         direction = 'LONG'
-                        entry_price = long_trigger_price
+                        entry_price = long_trigger_val if "High/Low" in trigger_mode else close
                         entry_time = bar_time
                         target_price = entry_price * (1 + profit_target_pct / 100.0)
                         stop_price = entry_price * (1 - stop_loss_pct / 100.0)
-                    elif trade_direction in ["Both (Long & Short)", "Short Only"] and low <= short_trigger_price:
+                    elif trade_direction in ["Both (Long & Short)", "Short Only"] and short_cond:
                         in_position = True
                         direction = 'SHORT'
-                        entry_price = short_trigger_price
+                        entry_price = short_trigger_val if "High/Low" in trigger_mode else close
                         entry_time = bar_time
                         target_price = entry_price * (1 - profit_target_pct / 100.0)
                         stop_price = entry_price * (1 + stop_loss_pct / 100.0)
