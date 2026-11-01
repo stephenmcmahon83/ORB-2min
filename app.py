@@ -3,19 +3,24 @@ import pandas as pd
 import numpy as np
 
 # Page Configuration
-st.set_page_config(page_title="ORB Matrix Strategy Optimizer", layout="wide")
+st.set_page_config(page_title="Fast Intraday ORB Backtester", layout="wide")
 
-st.title("Opening Range Breakout (ORB) Matrix Optimizer & Heatmap")
+st.title("Opening Range Breakout (ORB) Strategy Backtester")
 st.markdown("""
-Upload your 1-minute SPY CSV file to run parameter sweep matrices across stop losses, profit targets, 
-and holding bars for your selected Opening Range duration.
+A lightning-fast, single-pass intraday backtester using your uploaded 1-minute SPY dataset, 
+gap filtering, configurable triggers, stop loss rules, and position sizing modes.
 """)
 
 # Sidebar Controls
 st.sidebar.header("1. Data Upload")
-uploaded_file = st.sidebar.file_uploader("Upload SPY CSV File", type=["csv"])
+uploaded_file = st.sidebar.file_uploader("Upload SPY CSV File", type=["csv", "xlsx", "xls"])
 
-st.sidebar.header("2. Strategy Settings")
+st.sidebar.header("2. Strategy & Trigger Mode")
+strategy_type = st.sidebar.selectbox(
+    "Choose Strategy", 
+    options=["Opening Range Breakout (ORB)", "Open-Percent Threshold Strategy"]
+)
+
 trigger_mode = st.sidebar.selectbox(
     "Trigger Mode",
     options=[
@@ -24,13 +29,9 @@ trigger_mode = st.sidebar.selectbox(
     ]
 )
 
-stop_loss_rule = st.sidebar.selectbox(
-    "Stop Loss Rule",
-    options=[
-        "Fixed Percentage (%)", 
-        "Opening Range Boundary (OR Low/High ± 1 tick)"
-    ]
-)
+st.sidebar.header("3. Capital & Position Sizing")
+starting_capital = st.sidebar.number_input("Starting Capital ($)", value=20000.0, step=1000.0)
+commission_per_trade = st.sidebar.number_input("Commission per Trade ($)", value=1.0, step=0.25, format="%.2f")
 
 position_sizing_mode = st.sidebar.selectbox(
     "Position Sizing Mode",
@@ -40,18 +41,43 @@ position_sizing_mode = st.sidebar.selectbox(
     ]
 )
 
-st.sidebar.header("3. Capital & Execution")
-starting_capital = st.sidebar.number_input("Starting Capital ($)", value=20000.0, step=1000.0)
-commission_per_trade = st.sidebar.number_input("Commission per Trade ($)", value=1.0, step=0.25, format="%.2f")
+# Strategy Parameters
+st.sidebar.header("4. Strategy Parameters")
+if strategy_type == "Opening Range Breakout (ORB)":
+    or_minutes = st.sidebar.slider("Opening Range Duration (Minutes)", min_value=1, max_value=60, value=15, step=1)
+    exit_mode = st.sidebar.selectbox("Exit Mode", options=["Profit Target (%)", "Hold for X Bars"])
+    
+    stop_loss_rule = st.sidebar.selectbox(
+        "Stop Loss Rule", 
+        options=["Fixed Percentage (%)", "Opening Range Boundary (OR Low/High ± 1 tick)"]
+    )
+    if stop_loss_rule == "Fixed Percentage (%)":
+        stop_loss_pct = st.sidebar.slider("Stop Loss (%)", min_value=0.25, max_value=3.00, value=0.50, step=0.25)
+    else:
+        stop_loss_pct = 0.0
 
-st.sidebar.header("4. Opening Range Selection")
-or_minutes = st.sidebar.slider("Opening Range Duration (Minutes)", min_value=1, max_value=60, value=15, step=1)
+    if exit_mode == "Profit Target (%)":
+        profit_target_pct = st.sidebar.slider("Profit Target (%)", min_value=0.25, max_value=3.00, value=1.00, step=0.25)
+        holding_bars = 0
+    else:
+        profit_target_pct = 0.0
+        holding_bars = st.sidebar.slider("Holding Bars (1-min intervals)", min_value=1, max_value=240, value=10, step=1)
+else:
+    trade_direction = st.sidebar.selectbox("Trade Direction", options=["Both (Long & Short)", "Long Only", "Short Only"])
+    entry_threshold_pct = st.sidebar.slider("Entry Threshold (% from Open)", min_value=0.05, max_value=2.0, value=0.25, step=0.05)
+    profit_target_pct = st.sidebar.slider("Profit Target (%)", min_value=0.25, max_value=3.00, value=1.00, step=0.25)
+    stop_loss_pct = st.sidebar.slider("Stop Loss (%)", min_value=0.25, max_value=3.00, value=0.50, step=0.25)
+    stop_loss_rule = "Fixed Percentage (%)"
 
 if uploaded_file is not None:
     try:
-        df = pd.read_csv(uploaded_file, sep=None, engine='python')
+        file_extension = uploaded_file.name.split('.')[-1].lower()
+        if file_extension == 'csv':
+            df = pd.read_csv(uploaded_file, sep=None, engine='python')
+        else:
+            df = pd.read_excel(uploaded_file)
     except Exception as e:
-        st.error(f"Error reading CSV file: {e}")
+        st.error(f"Error reading data file: {e}")
         st.stop()
 
     try:
@@ -89,28 +115,38 @@ if uploaded_file is not None:
         st.error("No data remaining after filtering for regular trading hours.")
         st.stop()
 
-    # Pre-process daily groups for speed optimization during matrix sweeps
-    grouped_days_cache = []
-    for date, group in df.groupby(df.index.date):
-        clean_group = group[~group.index.duplicated(keep='first')]
-        if len(clean_group) >= or_minutes + 1:
-            grouped_days_cache.append((date, clean_group))
-
-    if not grouped_days_cache:
-        st.error("Not enough data bars available per day for the selected Opening Range duration.")
-        st.stop()
-
-    # Simulation engine for a specific set of parameters
-    def run_simulation(p_stop_loss, p_target=None, p_bars=None, is_profit_target=True):
-        raw_trades = []
-        num_or_bars = or_minutes
+    raw_trades = []
+    grouped_days = df.groupby(df.index.date)
+    skipped_days_count = 0
+    total_days_processed = 0
+    
+    for date, group in grouped_days:
+        total_days_processed += 1
+        group = group[~group.index.duplicated(keep='first')]
         
-        for date, group in grouped_days_cache:
-            or_slice = group.iloc[:num_or_bars]
+        # Gap check: ensure continuous minutes & full session bounds
+        if len(group) > 0:
+            expected_index = pd.date_range(start=group.index[0], end=group.index[-1], freq='1min')
+            reindexed_group = group.reindex(expected_index)
+            
+            if reindexed_group['Close'].isna().any() or len(group) < 390:
+                skipped_days_count += 1
+                continue
+            clean_group = reindexed_group
+        else:
+            skipped_days_count += 1
+            continue
+        
+        if strategy_type == "Opening Range Breakout (ORB)":
+            num_or_bars = or_minutes
+            if len(clean_group) < num_or_bars + 1:
+                continue
+            
+            or_slice = clean_group.iloc[:num_or_bars]
             or_high = or_slice['High'].max()
             or_low = or_slice['Low'].min()
             
-            trading_slice = group.iloc[num_or_bars:]
+            trading_slice = clean_group.iloc[num_or_bars:]
             in_position = False
             entry_price = 0.0
             entry_time = None
@@ -141,12 +177,12 @@ if uploaded_file is not None:
                         entry_time = bar_time
                         
                         if stop_loss_rule == "Fixed Percentage (%)":
-                            stop_price = entry_price * (1 - p_stop_loss / 100.0)
+                            stop_price = entry_price * (1 - stop_loss_pct / 100.0)
                         else:
                             stop_price = or_low - 0.01
                             
-                        if is_profit_target:
-                            target_price = entry_price * (1 + p_target / 100.0)
+                        if exit_mode == "Profit Target (%)":
+                            target_price = entry_price * (1 + profit_target_pct / 100.0)
                         bars_held = 0
                         
                     elif short_condition:
@@ -156,141 +192,227 @@ if uploaded_file is not None:
                         entry_time = bar_time
                         
                         if stop_loss_rule == "Fixed Percentage (%)":
-                            stop_price = entry_price * (1 + p_stop_loss / 100.0)
+                            stop_price = entry_price * (1 + stop_loss_pct / 100.0)
                         else:
                             stop_price = or_high + 0.01
                             
-                        if is_profit_target:
-                            target_price = entry_price * (1 - p_target / 100.0)
+                        if exit_mode == "Profit Target (%)":
+                            target_price = entry_price * (1 - profit_target_pct / 100.0)
                         bars_held = 0
                 else:
                     bars_held += 1
                     exit_price = None
+                    exit_reason = None
                     
                     if direction == 'LONG':
                         if low <= stop_price:
                             exit_price = stop_price
-                        elif is_profit_target and high >= target_price:
+                            exit_reason = 'Stop Loss'
+                        elif exit_mode == "Profit Target (%)" and high >= target_price:
                             exit_price = target_price
-                        elif not is_profit_target and bars_held >= p_bars:
+                            exit_reason = 'Profit Target'
+                        elif exit_mode == "Hold for X Bars" and bars_held >= holding_bars:
                             exit_price = close
+                            exit_reason = f'Bar Count ({holding_bars})'
                         elif i == len(trading_slice) - 1:
                             exit_price = close
+                            exit_reason = 'EOD Close'
                     elif direction == 'SHORT':
                         if high >= stop_price:
                             exit_price = stop_price
-                        elif is_profit_target and low <= target_price:
+                            exit_reason = 'Stop Loss'
+                        elif exit_mode == "Profit Target (%)" and low <= target_price:
                             exit_price = target_price
-                        elif not is_profit_target and bars_held >= p_bars:
+                            exit_reason = 'Profit Target'
+                        elif exit_mode == "Hold for X Bars" and bars_held >= holding_bars:
                             exit_price = close
+                            exit_reason = f'Bar Count ({holding_bars})'
                         elif i == len(trading_slice) - 1:
                             exit_price = close
+                            exit_reason = 'EOD Close'
                     
                     if exit_price is not None:
                         raw_trades.append({
+                            'Date': date,
+                            'Entry Time': entry_time,
+                            'Exit Time': bar_time,
                             'Direction': direction,
                             'Entry Price': entry_price,
-                            'Exit Price': exit_price
+                            'Exit Price': exit_price,
+                            'Exit Reason': exit_reason
+                        })
+                        in_position = False
+                        break
+        else:
+            # Open-Percent Threshold Strategy
+            if len(clean_group) < 2:
+                continue
+            
+            day_open = clean_group.iloc[0]['Open']
+            in_position = False
+            entry_price = 0.0
+            entry_time = None
+            direction = None
+            target_price = 0.0
+            stop_price = 0.0
+            
+            long_trigger_val = day_open * (1 + entry_threshold_pct / 100.0)
+            short_trigger_val = day_open * (1 - entry_threshold_pct / 100.0)
+            
+            for i in range(len(clean_group)):
+                bar = clean_group.iloc[i]
+                bar_time = clean_group.index[i]
+                high = bar['High']
+                low = bar['Low']
+                close = bar['Close']
+                
+                if not in_position:
+                    if trigger_mode == "High/Low Breakout (High/Low crosses threshold)":
+                        long_cond = (high >= long_trigger_val)
+                        short_cond = (low <= short_trigger_val)
+                    else:
+                        long_cond = (close >= long_trigger_val)
+                        short_cond = (close <= short_trigger_val)
+
+                    if trade_direction in ["Both (Long & Short)", "Long Only"] and long_cond:
+                        in_position = True
+                        direction = 'LONG'
+                        entry_price = long_trigger_val if "High/Low" in trigger_mode else close
+                        entry_time = bar_time
+                        target_price = entry_price * (1 + profit_target_pct / 100.0)
+                        stop_price = entry_price * (1 - stop_loss_pct / 100.0)
+                    elif trade_direction in ["Both (Long & Short)", "Short Only"] and short_cond:
+                        in_position = True
+                        direction = 'SHORT'
+                        entry_price = short_trigger_val if "High/Low" in trigger_mode else close
+                        entry_time = bar_time
+                        target_price = entry_price * (1 - profit_target_pct / 100.0)
+                        stop_price = entry_price * (1 + stop_loss_pct / 100.0)
+                else:
+                    exit_price = None
+                    exit_reason = None
+                    
+                    if direction == 'LONG':
+                        if low <= stop_price:
+                            exit_price = stop_price
+                            exit_reason = 'Stop Loss'
+                        elif high >= target_price:
+                            exit_price = target_price
+                            exit_reason = 'Profit Target'
+                        elif i == len(clean_group) - 1:
+                            exit_price = close
+                            exit_reason = 'EOD Close'
+                    elif direction == 'SHORT':
+                        if high >= stop_price:
+                            exit_price = stop_price
+                            exit_reason = 'Stop Loss'
+                        elif low <= target_price:
+                            exit_price = target_price
+                            exit_reason = 'Profit Target'
+                        elif i == len(clean_group) - 1:
+                            exit_price = close
+                            exit_reason = 'EOD Close'
+                            
+                    if exit_price is not None:
+                        raw_trades.append({
+                            'Date': date,
+                            'Entry Time': entry_time,
+                            'Exit Time': bar_time,
+                            'Direction': direction,
+                            'Entry Price': entry_price,
+                            'Exit Price': exit_price,
+                            'Exit Reason': exit_reason
                         })
                         in_position = False
                         break
 
-        if not raw_trades:
-            return 0.0, 0.0, 0
+    st.info(f"🔍 **Data Quality Filter Report:** Processed {total_days_processed} total calendar days. Omitted **{skipped_days_count} days** due to missing minute gaps or incomplete sessions. Backtested **{total_days_processed - skipped_days_count} clean days**.")
 
-        # Compounding/Position sizing execution
+    if not raw_trades:
+        st.warning("No trades were triggered using the current parameters and filtered dataset.")
+    else:
+        trades_df = pd.DataFrame(raw_trades).sort_values(by='Entry Time').reset_index(drop=True)
+        
         current_equity = starting_capital
-        total_pnl = 0.0
-        wins = 0
-        total_count = len(raw_trades)
-
-        for trade in raw_trades:
+        simulated_trades = []
+        
+        for _, row in trades_df.iterrows():
             if position_sizing_mode == "Compounding (Reinvest Profits)":
                 capital_to_risk = max(current_equity, 100.0)
             else:
                 capital_to_risk = max(min(current_equity, starting_capital), 100.0)
                 
-            shares = int(round(capital_to_risk / trade['Entry Price']))
+            shares = int(round(capital_to_risk / row['Entry Price']))
             if shares < 1:
                 shares = 1
                 
-            if trade['Direction'] == 'LONG':
-                gross_pnl = (trade['Exit Price'] - trade['Entry Price']) * shares
+            if row['Direction'] == 'LONG':
+                gross_pnl = (row['Exit Price'] - row['Entry Price']) * shares
             else:
-                gross_pnl = (trade['Entry Price'] - trade['Exit Price']) * shares
+                gross_pnl = (row['Entry Price'] - row['Exit Price']) * shares
                 
             net_pnl = gross_pnl - commission_per_trade
             current_equity += net_pnl
-            total_pnl += net_pnl
-            if net_pnl > 0:
-                wins += 1
+            
+            simulated_trades.append({
+                'Date': row['Date'],
+                'Entry Time': row['Entry Time'],
+                'Exit Time': row['Exit Time'],
+                'Direction': row['Direction'],
+                'Allocation Size ($)': round(capital_to_risk, 2),
+                'Shares': shares,
+                'Entry Price': row['Entry Price'],
+                'Exit Price': row['Exit Price'],
+                'Exit Reason': row['Exit Reason'],
+                'Net PnL ($)': round(net_pnl, 2),
+                'Running Equity ($)': round(current_equity, 2)
+            })
+            
+        final_trades_df = pd.DataFrame(simulated_trades).sort_values(by='Exit Time').reset_index(drop=True)
+        
+        st.subheader("Performance Summary")
+        total_net_pnl = final_trades_df['Net PnL ($)'].sum()
+        win_rate = (final_trades_df['Net PnL ($)'] > 0).mean() * 100
+        total_trades = len(final_trades_df)
+        winning_trades = len(final_trades_df[final_trades_df['Net PnL ($)'] > 0])
+        losing_trades = len(final_trades_df[final_trades_df['Net PnL ($)'] <= 0])
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Net PnL", f"${total_net_pnl:,.2f}")
+        col2.metric("Win Rate", f"{win_rate:.1f}%")
+        col3.metric("Total Trades", total_trades)
+        col4.metric("Wins / Losses", f"{winning_trades} / {losing_trades}")
+        
+        st.subheader("Long vs. Short Breakdown")
+        long_trades = final_trades_df[final_trades_df['Direction'] == 'LONG']
+        short_trades = final_trades_df[final_trades_df['Direction'] == 'SHORT']
+        
+        l_col1, l_col2 = st.columns(2)
+        with l_col1:
+            st.markdown("#### 🟢 Long Trades")
+            if not long_trades.empty:
+                l_pnl = long_trades['Net PnL ($)'].sum()
+                l_win_rate = (long_trades['Net PnL ($)'] > 0).mean() * 100
+                st.metric("Long Net PnL", f"${l_pnl:,.2f}")
+                st.metric("Long Win Rate", f"{l_win_rate:.1f}%", f"{len(long_trades)} trades")
+            else:
+                st.info("No long trades taken.")
+                
+        with l_col2:
+            st.markdown("#### 🔴 Short Trades")
+            if not short_trades.empty:
+                s_pnl = short_trades['Net PnL ($)'].sum()
+                s_win_rate = (short_trades['Net PnL ($)'] > 0).mean() * 100
+                st.metric("Short Net PnL", f"${s_pnl:,.2f}")
+                st.metric("Short Win Rate", f"{s_win_rate:.1f}%", f"{len(short_trades)} trades")
+            else:
+                st.info("No short trades taken.")
 
-        win_rate = (wins / total_count) * 100 if total_count > 0 else 0.0
-        return round(total_pnl, 2), round(win_rate, 1), total_count
-
-    # Define Parameter Ranges
-    stop_losses = [round(x, 2) for x in np.arange(0.25, 2.05, 0.25)]          # 0.25% to 2.00% step 0.25
-    profit_targets = [round(x, 2) for x in np.arange(0.25, 5.05, 0.25)]      # 0.25% to 5.00% step 0.25
-    bars_held_range = list(range(5, 241, 10))                                # 5 to 240 bars step 10
-
-    with st.spinner(f"Computing matrix sweeps for {or_minutes}-Minute Opening Range..."):
-        # Matrix 1: Profit Targets vs Stop Losses
-        pt_pnl_data = []
-        pt_wr_data = []
-
-        for sl in stop_losses:
-            pnl_row = {}
-            wr_row = {}
-            for pt in profit_targets:
-                pnl, wr, _ = run_simulation(p_stop_loss=sl, p_target=pt, is_profit_target=True)
-                pnl_row[f"{pt}%"] = pnl
-                wr_row[f"{pt}%"] = f"{wr}%"
-            pt_pnl_data.append(pnl_row)
-            pt_wr_data.append(wr_row)
-
-        df_pt_pnl = pd.DataFrame(pt_pnl_data, index=[f"{sl}%" for sl in stop_losses])
-        df_pt_wr = pd.DataFrame(pt_wr_data, index=[f"{sl}%" for sl in stop_losses])
-
-        # Matrix 2: Bars Held vs Stop Losses
-        bh_pnl_data = []
-        bh_wr_data = []
-
-        for sl in stop_losses:
-            pnl_row = {}
-            wr_row = {}
-            for bh in bars_held_range:
-                pnl, wr, _ = run_simulation(p_stop_loss=sl, p_bars=bh, is_profit_target=False)
-                pnl_row[f"{bh}b"] = pnl
-                wr_row[f"{bh}b"] = f"{wr}%"
-            bh_pnl_data.append(pnl_row)
-            bh_wr_data.append(wr_row)
-
-        df_bh_pnl = pd.DataFrame(bh_pnl_data, index=[f"{sl}%" for sl in stop_losses])
-        df_bh_wr = pd.DataFrame(bh_wr_data, index=[f"{sl}%" for sl in stop_losses])
-
-    # Automated Robust Range Analysis Summary
-    max_pnl_val = df_pt_pnl.max().max()
-    robust_summary = f"Based on the generated performance sweep for the **{or_minutes}-minute Opening Range**, the most robust performance cluster concentrates around **Stop Losses between 0.75% and 1.50%** paired with **Profit Targets between 1.00% and 2.50%**, yielding peak aggregate net returns."
-    
-    st.info(f"💡 **Strategy Robustness Insight:** {robust_summary}")
-
-    st.subheader(f"📊 Parameter Heatmaps for {or_minutes}-Minute Opening Range")
-
-    st.markdown("### 1. Profit Targets (%) [Top Row] vs. Stop Losses (%) [Left Column]")
-    st.markdown("**Total Net Returns ($)**")
-    st.dataframe(df_pt_pnl.style.background_gradient(cmap="RdYlGn", axis=None), use_container_width=True)
-    
-    st.markdown("**Win Rates (%)**")
-    st.dataframe(df_pt_wr.style.background_gradient(cmap="Blues", axis=None), use_container_width=True)
-
-    st.markdown("---")
-
-    st.markdown("### 2. Bars Held [Top Row] vs. Stop Losses (%) [Left Column]")
-    st.markdown("**Total Net Returns ($)**")
-    st.dataframe(df_bh_pnl.style.background_gradient(cmap="RdYlGn", axis=None), use_container_width=True)
-    
-    st.markdown("**Win Rates (%)**")
-    st.dataframe(df_bh_wr.style.background_gradient(cmap="Blues", axis=None), use_container_width=True)
-
+        final_trades_df['Cumulative PnL'] = final_trades_df['Net PnL ($)'].cumsum()
+        st.subheader("Strategy Equity Curve")
+        st.line_chart(final_trades_df.set_index('Exit Time')['Cumulative PnL'])
+        
+        st.subheader("Master Trade Log")
+        st.dataframe(final_trades_df, use_container_width=True)
 else:
-    st.info("👈 Please upload your SPY 1-minute CSV file using the sidebar file uploader to generate the heatmaps.")
+    st.info("👈 Please upload your SPY dataset using the sidebar file uploader to begin.")
